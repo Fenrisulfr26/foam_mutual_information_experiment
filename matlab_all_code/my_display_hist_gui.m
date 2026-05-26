@@ -11,8 +11,8 @@ function my_display_hist_gui()
         'Name', 'Display Histogram From File', ...
         'Position', [320, 260, 680, 360]);
 
-    grid = uigridlayout(fig, [5, 1]);
-    grid.RowHeight = {44, 34, 34, '1x', 40};
+    grid = uigridlayout(fig, [6, 1]);
+    grid.RowHeight = {44, 34, 34, 30, '1x', 40};
     grid.Padding = [14, 14, 14, 14];
     grid.RowSpacing = 10;
 
@@ -46,6 +46,10 @@ function my_display_hist_gui()
     variableDropDown = uidropdown(variableGrid, ...
         'Items', {}, ...
         'Enable', 'off');
+
+    chkDarkCorrected = uicheckbox(grid, ...
+        'Text', '展示暗噪声修正后结果', ...
+        'Value', false);
 
     logArea = uitextarea(grid, ...
         'Editable', 'off', ...
@@ -120,6 +124,15 @@ function my_display_hist_gui()
         try
             data = load(char(selectedFile), varName);
             histgram = data.(varName);
+
+            if chkDarkCorrected.Value
+                [histgram, correctionInfo] = correct_hot_dark_pixels(histgram);
+                my_display_hist(histgram);
+                appendLog(sprintf('已展示暗噪声修正后的变量 %s，尺寸 %s，修正 %d 个像素。', ...
+                    varName, mat2str(size(histgram)), correctionInfo.numHotPixels));
+                return;
+            end
+
             my_display_hist(histgram);
             appendLog(sprintf('已展示变量 %s，尺寸 %s。', varName, mat2str(size(histgram))));
         catch ME

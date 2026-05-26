@@ -52,40 +52,44 @@ for group_idx = 1:1
     hist_current = series2hist(series, laser_rep_rate);
 
     % Convert to double before accumulation to avoid integer overflow
-    hist_current = double(hist_current);
-    
-    if issaverepeat == 1
-        hist = hist_current;
-        save(sprintf("data/test_repeat/hist_%d",group_idx),"hist")
-    end
+    % hist_current = double(hist_current);
+    % 
+    % if issaverepeat == 1
+    %     hist = hist_current;
+    %     save(sprintf("data/test_repeat/hist_%d",group_idx),"hist")
+    % end
+    % 
+    % if group_idx == 1
+    %     hist_sum = zeros(size(hist_current));
+    % else
+    %     if ~isequal(size(hist_current), size(hist_sum))
+    %         error('Histogram size mismatch at group %d.', group_idx)
+    %     end
+    % end
 
-    if group_idx == 1
-        hist_sum = zeros(size(hist_current));
-    else
-        if ~isequal(size(hist_current), size(hist_sum))
-            error('Histogram size mismatch at group %d.', group_idx)
-        end
-    end
+    % hist_sum = hist_sum + hist_current;
+    % hist_all{group_idx} = hist_current;
 
-    hist_sum = hist_sum + hist_current;
-    hist_all{group_idx} = hist_current;
-
-    clear series hist_current
+    % clear series hist_current
 
 end
 
 elapsed_time = toc;
 
-hist_avg = hist_sum / num_groups;
+% hist_avg = hist_sum / num_groups;
 
 fprintf('\nFinished acquisition.\n')
 fprintf('Total time: %.2f s\n', elapsed_time)
 fprintf('Average time per group: %.2f s\n', elapsed_time / num_groups)
 
 % ---------------- Display averaged histogram ----------------
-my_display_hist(hist)
-my_display_hist(hist_avg)
-my_display_hist(hist_sum)
+hist_current = correct_hot_dark_pixels(hist_current);
+my_display_hist(hist_current)
+
+
+% save('IRF.mat',"hist_current")
+% my_display_hist(hist_avg)
+% my_display_hist(hist_sum)
 
 %%
 
