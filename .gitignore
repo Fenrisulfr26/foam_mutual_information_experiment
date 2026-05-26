@@ -1,0 +1,74 @@
+# Ignore everything by default. This repository is for source code only.
+*
+
+# Keep directory traversal enabled so nested source files can be unignored.
+!*/
+
+# Git / docs / project metadata that are safe to version.
+!.gitignore
+!/README*
+!/LICENSE*
+!/requirements*.txt
+!/pyproject.toml
+!/setup.py
+!/setup.cfg
+!/environment*.yml
+!/environment*.yaml
+
+# MATLAB source code.
+!*.m
+!*.mlx
+!*.mlapp
+
+# Python source code.
+!*.py
+!*.pyi
+!*.ipynb
+
+# Always ignore generated caches and local environments.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Never upload experiment data or bulky generated files.
+*.mat
+*.fig
+*.asv
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.h5
+*.hdf5
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+*.avi
+*.mp4
+*.mov
+data/
+**/data/
+raw/
+**/raw/
+results/
+**/results/
+output/
+**/output/
