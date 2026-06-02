@@ -93,6 +93,8 @@ class FitSettings:
     pixel_list: str
     gpuid: int
     seed: int
+    loss_func: str = "composite"
+
 
 
 def parse_pixel_selection(settings: FitSettings) -> list[tuple[int, int]]:
@@ -206,7 +208,7 @@ def normalize_cube(cube):
     return cube / m if m > 0 else cube
 
 
-def fit_loss(sim_cube, exp_cube, selected_pixels):
+def fit_loss(sim_cube, exp_cube, selected_pixels, loss_func="composite"):
     mask = np.zeros((NUM_PIX, NUM_PIX), dtype=bool)
     for y, x in selected_pixels:
         mask[y, x] = True
@@ -216,6 +218,10 @@ def fit_loss(sim_cube, exp_cube, selected_pixels):
 
     sim_sel = sim[mask, :]
     exp_sel = exp[mask, :]
+
+    if loss_func == "simple_rmse":
+        return np.sqrt(np.mean((sim_sel - exp_sel) ** 2))
+
     loss_3d = weighted_3d_rmse(sim_sel, exp_sel)
 
     sim_map = sum_normalize(np.sum(sim, axis=2)[mask])
@@ -227,6 +233,7 @@ def fit_loss(sim_cube, exp_cube, selected_pixels):
     loss_time = np.sqrt(np.mean((sim_time - exp_time) ** 2))
 
     return 0.60 * loss_3d + 0.25 * loss_map + 0.15 * loss_time
+
 
 
 def plot_grid_loss_surface(loss_grid, mua_values, mus_values, show=True):
@@ -345,7 +352,7 @@ class FitEngine:
         started = time.perf_counter()
         try:
             sim_cube = self.run_sim(params)
-            loss = float(fit_loss(sim_cube, self.exp_cube, self.selected_pixels))
+            loss = float(fit_loss(sim_cube, self.exp_cube, self.selected_pixels, self.settings.loss_func))
         except Exception as exc:
             self.log(f"[warn] simulation failed at {params}: {exc}")
             return 1e12
@@ -402,7 +409,7 @@ class FitEngine:
             loss = float(self.best_loss)
         else:
             sim_cube = self.run_sim(params)
-            loss = float(fit_loss(sim_cube, self.exp_cube, self.selected_pixels))
+            loss = float(fit_loss(sim_cube, self.exp_cube, self.selected_pixels, self.settings.loss_func))
         return OptimizeResult(x=params, fun=loss, success=True, message=f"best candidate from {source}", sim_cube=sim_cube)
 
     def fit_grid_search(self):
@@ -432,7 +439,7 @@ class FitEngine:
                 try:
                     sim_cube = self.run_sim(params)
                     sim_compare = normalize_cube(sim_cube)
-                    loss = float(fit_loss(sim_compare, exp_compare, self.selected_pixels))
+                    loss = float(fit_loss(sim_compare, exp_compare, self.selected_pixels, self.settings.loss_func))
                 except Exception as exc:
                     self.log(f"[warn] grid simulation failed at mua={mua:.8g}, mus={mus:.8g}: {exc}")
                     loss = 1e12
@@ -488,7 +495,7 @@ class FitEngine:
             max_nfev=self.settings.max_evals,
         )
         sim_cube = self.run_sim(popt)
-        loss = float(fit_loss(sim_cube, self.exp_cube, self.selected_pixels))
+        loss = float(fit_loss(sim_cube, self.exp_cube, self.selected_pixels, self.settings.loss_func))
         return OptimizeResult(x=np.asarray(popt), fun=loss, success=True, message="curve_fit finished", pcov=pcov, sim_cube=sim_cube)
 
     def save_result(self, result):
@@ -747,6 +754,8 @@ class PMCXFitWindow(QMainWindow):
         self.max_evals = self.spin_int(1, 10000, 80)
         self.grid_mua_steps = self.spin_int(2, 1000, 100)
         self.grid_mus_steps = self.spin_int(2, 1000, 100)
+        self.loss_func = QComboBox()
+        self.loss_func.addItems(["composite", "simple_rmse"])
         for label, widget in [
             ("mua initial", self.mua0),
             ("mus initial", self.mus0),
@@ -762,6 +771,7 @@ class PMCXFitWindow(QMainWindow):
             ("max evals", self.max_evals),
             ("grid mu_a steps", self.grid_mua_steps),
             ("grid mu_s steps", self.grid_mus_steps),
+            ("loss function", self.loss_func),
         ]:
             form.addRow(label, widget)
         return group
@@ -847,6 +857,7 @@ class PMCXFitWindow(QMainWindow):
             pixel_list=self.pixel_list.text(),
             gpuid=self.gpuid.value(),
             seed=self.seed.value(),
+            loss_func=self.loss_func.currentText(),
         )
 
     def append_log(self, text):

@@ -65,6 +65,8 @@ LOSS_SPACE_WEIGHT = 0.75
 LOSS_TIME_WEIGHT = 0.25
 FIT_REFRACTIVE_INDEX = False
 N_BOUNDS = (1.0, 2.2)
+LOSS_FUNC = "composite"  # "composite" or "simple_rmse"
+
 
 
 def _mat_public_vars(mat_dict):
@@ -405,6 +407,9 @@ class PMCXFitter:
         sim = np.asarray(sim_compare, dtype=float)
         exp = np.asarray(self.exp_compare, dtype=float)
     
+        if LOSS_FUNC == "simple_rmse":
+            return np.sqrt(np.mean((sim - exp) ** 2))
+
         loss_3d = weighted_3d_rmse(sim, exp)
     
         # 额外保证 2D 空间积分图相似
