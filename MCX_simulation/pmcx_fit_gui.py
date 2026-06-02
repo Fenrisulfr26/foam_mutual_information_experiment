@@ -520,10 +520,10 @@ class FitEngine:
             (axes[1], sim_map, "Simulation", "jet"),
             (axes[2], diff, "Absolute difference", "hot"),
         ]:
-            im = ax.imshow(data, origin="lower", cmap=cmap)
+            im = ax.imshow(data, origin="upper", cmap=cmap)
             ax.set_title(title)
-            ax.set_xlabel("X index")
-            ax.set_ylabel("Y index")
+            ax.set_xlabel("Y index")
+            ax.set_ylabel("Z index")
             plt.colorbar(im, ax=ax)
         fig.tight_layout()
         fig.savefig(result_dir / "fitting_comparison.png", dpi=150)

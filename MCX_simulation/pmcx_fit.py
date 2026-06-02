@@ -168,18 +168,21 @@ def extract_sim_cube(res, cfg, num_pix=NUM_PIX):
     
     edges = tstart_ns + np.arange(nt + 1) * tstep_ns
 
-    cube = np.zeros((num_pix, num_pix, nt), dtype=float)
     y_idx = detid0 % num_pix
     z_idx = detid0 // num_pix
     t_idx = np.searchsorted(edges, tof_ns, side="right") - 1
     t_valid = (t_idx >= 0) & (t_idx < nt)
 
-    y_idx = y_idx[t_valid]
-    z_idx = z_idx[t_valid]
+    # Directly map Z and Y to the camera perspective (from -X axis view)
+    z_img = num_pix - 1 - z_idx[t_valid]
+    y_img = num_pix - 1 - y_idx[t_valid]
     t_idx = t_idx[t_valid]
 
-    np.add.at(cube, (y_idx, z_idx, t_idx), photon_weight[t_valid])
+    cube = np.zeros((num_pix, num_pix, nt), dtype=float)
+    np.add.at(cube, (z_img, y_img, t_idx), photon_weight[t_valid])
     return cube
+
+# align_to_camera_view function was removed as we now generate the simulation cube directly in camera view in extract_sim_cube.
 
 def sum_normalize(arr, eps=1e-12):
     arr = np.asarray(arr, dtype=float)
@@ -394,6 +397,7 @@ class PMCXFitter:
         cube = extract_sim_cube(res, cfg, num_pix=NUM_PIX)
         cube_conv = convolve_irf_all_pixels_tcspc(cube, self.irf)
 
+        # Since cube_conv is already in camera view, we assign directly
         sim_compare = cube_conv
         sim_compare = global_max_normalize(sim_compare)
         
@@ -650,15 +654,15 @@ class PMCXFitter:
         exp_map2d = self.exp_map2d
         diff = np.abs(exp_map2d - sim_map2d)
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        im0 = axes[0].imshow(exp_map2d, origin="lower", cmap="jet")
+        im0 = axes[0].imshow(exp_map2d, origin="upper", cmap="jet")
         axes[0].set_title("Experiment (normalized)")
         plt.colorbar(im0, ax=axes[0])
 
-        im1 = axes[1].imshow(sim_map2d, origin="lower", cmap="jet")
+        im1 = axes[1].imshow(sim_map2d, origin="upper", cmap="jet")
         axes[1].set_title("Simulation after IRF + norm")
         plt.colorbar(im1, ax=axes[1])
 
-        im2 = axes[2].imshow(diff, origin="lower", cmap="hot")
+        im2 = axes[2].imshow(diff, origin="upper", cmap="hot")
         axes[2].set_title("Absolute difference")
         plt.colorbar(im2, ax=axes[2])
 

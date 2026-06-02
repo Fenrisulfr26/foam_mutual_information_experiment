@@ -139,6 +139,7 @@ class ObjSimSettings:
     gpuid: int
     seed: int
 
+# X：depth; Y：width; Z：height
 
 def build_detector_array_centered(
     slab_thickness_mm: float,
@@ -150,9 +151,9 @@ def build_detector_array_centered(
     voxel_size_mm: float,
 ):
     pitch_mm = fov_mm / num_pix
-    offsets_mm = (np.arange(num_pix) + 0.5) * pitch_mm - fov_mm / 2
-    yy_mm = center_y_mm + offsets_mm
-    zz_mm = center_z_mm + offsets_mm
+    offsets_mm = (np.arange(num_pix) + 0.5) * pitch_mm - fov_mm / 2 # from low 2 high, centered around zero
+    yy_mm = center_y_mm + offsets_mm[::-1] # from galvo's view, right to left
+    zz_mm = center_z_mm + offsets_mm[::-1] # from galvo's view, from top to bottom
     det_radius_mm = detector_diameter_mm / 2
 
     detpos = []
@@ -193,13 +194,7 @@ def sum_normalize(arr: np.ndarray):
     return arr / total if total > 0 else arr
 
 
-def camera_view_cube(cube: np.ndarray):
-    """Convert MCX detector cube to the camera-view orientation used by experiment data."""
-
-    cube = np.asarray(cube, dtype=float)
-    if cube.ndim != 3:
-        raise ValueError("camera_view_cube expects a 3D cube")
-    return cube[:, ::-1, :]
+# camera_view_cube function was removed as we now generate all simulation cubes directly in camera view.
 
 
 def crop_cache_path(output_root: str, image_path: str, threshold: int):
@@ -418,12 +413,14 @@ def make_object_cfg(settings: ObjSimSettings, mask: np.ndarray):
 
     x_idx = int(round(settings.object_x_mm / settings.voxel_size_mm))
     x_idx = max(0, min(nx - 1, x_idx))
+    # slice from low 2 high
     y_slice = _clip_slice(settings.object_center_y_mm, settings.object_size_y_mm, settings.voxel_size_mm, ny)
     z_slice = _clip_slice(settings.object_center_z_mm, settings.object_size_z_mm, settings.voxel_size_mm, nz)
 
     target_shape = (z_slice.stop - z_slice.start, y_slice.stop - y_slice.start)
     mask_zy = resize_mask(mask, target_shape)
-    vol[x_idx, y_slice, z_slice] = mask_zy.T
+    # Correctly align Y to Y and Z to Z, reversing both axes to match camera view from -X
+    vol[x_idx, y_slice, z_slice] = mask_zy[::-1, :].T
 
     detpos, yy_mm, zz_mm = build_detector_array_centered(
         slab_thickness_mm=settings.slab_thickness_mm,
@@ -512,10 +509,11 @@ def detp_to_detector_outputs(res, cfg, nt: int):
     t_idx = np.searchsorted(edges, tof_ns, side="right") - 1
     t_valid = (t_idx >= 0) & (t_idx < nt)
 
-    cube = np.zeros((NUM_PIX, NUM_PIX, nt), dtype=float)
     y_idx = detid0[t_valid] % NUM_PIX
     z_idx = detid0[t_valid] // NUM_PIX
-    np.add.at(cube, (y_idx, z_idx, t_idx[t_valid]), weights[t_valid])
+
+    cube = np.zeros((NUM_PIX, NUM_PIX, nt), dtype=float)
+    np.add.at(cube, (z_idx, y_idx, t_idx[t_valid]), weights[t_valid])
 
     intensity = np.sum(cube, axis=2)
     return intensity, cube
@@ -523,7 +521,7 @@ def detp_to_detector_outputs(res, cfg, nt: int):
 
 def plot_intensity(intensity, out_path: Path):
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(intensity, origin="lower", cmap="jet")
+    im = ax.imshow(intensity, origin="upper", cmap="jet")
     ax.set_title("32 x 32 detector weighted intensity")
     ax.set_xlabel("Detector y index")
     ax.set_ylabel("Detector z index")
@@ -601,7 +599,7 @@ def run_simulation(settings: ObjSimSettings, log=print):
     log("pmcx.mcxlab returned; extracting detected photons...")
 
     nt = int(np.ceil((cfg["tend"] - cfg["tstart"]) / cfg["tstep"]))
-    intensity_raw, cube_raw = detp_to_detector_outputs(res, cfg, nt=nt) # get cube from sim result
+    intensity_raw, cube_raw = detp_to_detector_outputs(res, cfg, nt=nt) # get 32x32x227 cube from sim result
     detp = res.get("detp") if isinstance(res, dict) else None
     detid = pmcx_sim.extract_detector_id_from_detp(detp)
     ppath = pmcx_sim.extract_partial_path_from_detp(detp)
@@ -618,15 +616,19 @@ def run_simulation(settings: ObjSimSettings, log=print):
     cube_irf = convolve_irf_all_pixels_tcspc(cube_raw, irf, period_bins=period_bins)
     cube_irf_max_norm = normalize_cube(cube_irf)
     cube_irf_sum_norm = sum_normalize(cube_irf)
-    cube_irf_camera = camera_view_cube(cube_irf)
-    cube_irf_max_norm_camera = camera_view_cube(cube_irf_max_norm)
-    cube_irf_sum_norm_camera = camera_view_cube(cube_irf_sum_norm)
+
+    # Since cube_irf is already in camera view, we assign directly
+    cube_irf_camera = cube_irf
+    cube_irf_max_norm_camera = cube_irf_max_norm
+    cube_irf_sum_norm_camera = cube_irf_sum_norm
+
     intensity_irf_raw = np.sum(cube_irf, axis=2)
     intensity_max_norm = np.sum(cube_irf_max_norm, axis=2)
     intensity_sum_norm = np.sum(cube_irf_sum_norm, axis=2)
-    intensity_irf_raw_camera = np.sum(cube_irf_camera, axis=2)
-    intensity_max_norm_camera = np.sum(cube_irf_max_norm_camera, axis=2)
-    intensity_sum_norm_camera = np.sum(cube_irf_sum_norm_camera, axis=2)
+
+    intensity_irf_raw_camera = intensity_irf_raw
+    intensity_max_norm_camera = intensity_max_norm
+    intensity_sum_norm_camera = intensity_sum_norm
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_dir = Path(settings.output_root) / f"{timestamp}_obj_pmcx"
@@ -741,10 +743,10 @@ class PMCXObjectWindow(QMainWindow):
 
         paths = QGroupBox("Data and output")
         path_layout = QGridLayout(paths)
-        self.exp_path = QLineEdit("")
+        self.exp_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data")
         self.exp_point_index = self.spin_int(1, 100, 1)
-        self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF.mat")
-        self.mask_path = QLineEdit("")
+        self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF_20260601_165629_deg_2_exp_2us_frames_100000_avg_1\hist_2us_100000_avg1_point05_center_obj.mat")
+        self.mask_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\MCX_simulation\obj_figure")
         self.reuse_crop = QCheckBox("Reuse cached crop for this image")
         self.reuse_crop.setChecked(True)
         self.output_root = QLineEdit(str(Path.cwd() / "obj_sim_results"))
@@ -793,13 +795,13 @@ class PMCXObjectWindow(QMainWindow):
     def sim_group(self):
         group = QGroupBox("PMCX simulation")
         form = QFormLayout(group)
-        self.nphoton = self.spin_int(1, 1_000_000_000, 1_000_000)
+        self.nphoton = self.spin_int(1, 1_000_000_000, 10_000_000)
         self.voxel = self.spin_float(0.1, 10, 1.0, 2)
         self.thickness = self.spin_float(1, 500, 50.0, 2)
         self.width = self.spin_float(1, 1000, 250.0, 2)
         self.height = self.spin_float(1, 1000, 250.0, 2)
         self.fov = self.spin_float(1, 1000, 140.0, 2)
-        self.det_diam = self.spin_float(0.01, 100, 1.0, 3)
+        self.det_diam = self.spin_float(0.01, 100, 2.0, 3)
         self.gpuid = self.spin_int(0, 16, 1)
         self.seed = self.spin_int(1, 2_000_000_000, 123456789)
         for label, widget in [
@@ -849,8 +851,8 @@ class PMCXObjectWindow(QMainWindow):
         form = QFormLayout(group)
         self.mua = self.spin_float(1e-6, 1, 0.0019, 6)
         self.mus = self.spin_float(1e-4, 100, 1.4, 5)
-        self.g = self.spin_float(-0.99, 0.99, 0.9, 3)
-        self.n = self.spin_float(1.0, 3.0, 1.4, 4)
+        self.g = self.spin_float(-0.99, 0.99, 0, 3)
+        self.n = self.spin_float(1.0, 3.0, 1.05, 4)
         for label, widget in [
             ("mua mm^-1", self.mua),
             ("mus mm^-1", self.mus),
@@ -889,12 +891,48 @@ class PMCXObjectWindow(QMainWindow):
         return box
 
     def browse_file(self, line_edit, file_filter):
-        path, _ = QFileDialog.getOpenFileName(self, "Select file", "", file_filter)
+        current_path = line_edit.text().strip()
+        initial_dir = ""
+        if current_path:
+            try:
+                p = Path(current_path)
+                if p.is_file():
+                    initial_dir = str(p.parent)
+                elif p.is_dir():
+                    initial_dir = str(p)
+                else:
+                    for parent in p.parents:
+                        if parent.exists():
+                            initial_dir = str(parent)
+                            break
+            except Exception:
+                pass
+        if not initial_dir:
+            initial_dir = r"F:\OneDrive\foam_imaging_project"
+
+        path, _ = QFileDialog.getOpenFileName(self, "Select file", initial_dir, file_filter)
         if path:
             line_edit.setText(path)
 
     def browse_dir(self, line_edit):
-        path = QFileDialog.getExistingDirectory(self, "Select folder")
+        current_path = line_edit.text().strip()
+        initial_dir = ""
+        if current_path:
+            try:
+                p = Path(current_path)
+                if p.is_dir() and p.exists():
+                    initial_dir = str(p)
+                else:
+                    for parent in p.parents:
+                        if parent.exists():
+                            initial_dir = str(parent)
+                            break
+            except Exception:
+                pass
+        if not initial_dir:
+            initial_dir = r"F:\OneDrive\foam_imaging_project"
+
+        path = QFileDialog.getExistingDirectory(self, "Select folder", initial_dir)
         if path:
             line_edit.setText(path)
 
@@ -1075,7 +1113,8 @@ class PMCXObjectWindow(QMainWindow):
             sim_is_camera_view = False
         sim_cube = np.asarray(data[sim_key], dtype=float)
         if not sim_is_camera_view:
-            sim_cube = camera_view_cube(sim_cube)
+            # Inline legacy camera view conversion (Transpose YxZxT -> ZxYxT, then flip Z and Y)
+            sim_cube = sim_cube.transpose(1, 0, 2)[::-1, ::-1, :]
         exp_cube, exp_var = load_experiment_cube(exp_path, exp_point_index)
         sim_cube = match_time_bins(sim_cube, exp_cube.shape[2])
         exp_display = normalize_cube(exp_cube)
