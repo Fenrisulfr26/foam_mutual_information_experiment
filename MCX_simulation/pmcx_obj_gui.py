@@ -580,7 +580,47 @@ def plot_experiment_sim_comparison(exp_cube, sim_cube, out_path: Path):
     plt.close(fig)
 
 
-def run_simulation(settings: ObjSimSettings, log=print):
+def scan_source_positions(center_y_mm: float, center_z_mm: float, spacing_mm: float):
+    positions = []
+    for row, z_offset in enumerate([spacing_mm, 0.0, -spacing_mm], start=1):
+        for col, y_offset in enumerate([-spacing_mm, 0.0, spacing_mm], start=1):
+            point_index = (row - 1) * 3 + col
+            positions.append(
+                {
+                    "point_index": point_index,
+                    "row": row,
+                    "col": col,
+                    "source_y_mm": float(center_y_mm + y_offset),
+                    "source_z_mm": float(center_z_mm + z_offset),
+                }
+            )
+    return positions
+
+
+def plot_scan_overview(cubes, positions, out_path: Path):
+    cubes = np.asarray(cubes, dtype=float)
+    maps = np.sum(cubes, axis=3)
+    vmax = float(np.nanmax(maps)) if maps.size else 0.0
+    if vmax <= 0:
+        vmax = None
+
+    fig, axes = plt.subplots(3, 3, figsize=(9, 8))
+    for idx, ax in enumerate(axes.flat):
+        im = ax.imshow(maps[idx], origin="upper", cmap="jet", vmin=0, vmax=vmax)
+        pos = positions[idx]
+        ax.set_title(
+            f"P{pos['point_index']:02d}  y={pos['source_y_mm']:.1f}, z={pos['source_z_mm']:.1f}",
+            fontsize=9,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.82, label="Accumulated intensity")
+    fig.suptitle("3 x 3 source scan overview", fontsize=12)
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def run_simulation(settings: ObjSimSettings, log=print, result_dir: str | Path | None = None):
     started = time.perf_counter()
     if settings.selected_mask_path and os.path.exists(settings.selected_mask_path):
         log("Loading selected binary mask...")
@@ -630,8 +670,11 @@ def run_simulation(settings: ObjSimSettings, log=print):
     intensity_max_norm_camera = intensity_max_norm
     intensity_sum_norm_camera = intensity_sum_norm
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = Path(settings.output_root) / f"{timestamp}_obj_pmcx"
+    if result_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_dir = Path(settings.output_root) / f"{timestamp}_obj_pmcx"
+    else:
+        result_dir = Path(result_dir)
     result_dir.mkdir(parents=True, exist_ok=False)
 
     plot_intensity(intensity_sum_norm_camera, result_dir / "detector_intensity_sum_normalized.png")
@@ -729,12 +772,125 @@ def run_from_settings_file(settings_path: str):
     print(f"RESULT_DIR={result_dir}", flush=True)
 
 
+def run_scan_from_settings_file(settings_path: str):
+    with open(settings_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    settings = ObjSimSettings(**payload["settings"])
+    scan = payload["scan"]
+    center_y = float(scan["center_y_mm"])
+    center_z = float(scan["center_z_mm"])
+    spacing = float(scan["spacing_mm"])
+
+    scan_dir = run_source_scan(
+        settings,
+        center_y_mm=center_y,
+        center_z_mm=center_z,
+        spacing_mm=spacing,
+        log=lambda text: print(text, flush=True),
+    )
+    print(f"SCAN_DIR={scan_dir}", flush=True)
+
+
+def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: float, spacing_mm: float, log=print):
+    started = time.perf_counter()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    scan_dir = Path(settings.output_root) / f"{timestamp}_obj_pmcx_3x3_scan"
+    point_root = scan_dir / "point_runs"
+    scan_dir.mkdir(parents=True, exist_ok=False)
+    point_root.mkdir(parents=True, exist_ok=False)
+
+    positions = scan_source_positions(center_y_mm, center_z_mm, spacing_mm)
+    cubes = []
+    raw_cubes = []
+    sum_norm_cubes = []
+    point_dirs = []
+
+    log(
+        "Starting 3 x 3 source scan: "
+        f"center y={center_y_mm:.2f} mm, center z={center_z_mm:.2f} mm, spacing={spacing_mm:.2f} mm"
+    )
+    for pos in positions:
+        point_settings = ObjSimSettings(**asdict(settings))
+        point_settings.source_y_mm = pos["source_y_mm"]
+        point_settings.source_z_mm = pos["source_z_mm"]
+        point_settings.seed = int(settings.seed) + pos["point_index"] - 1
+        point_dir = point_root / (
+            f"point{pos['point_index']:02d}_row{pos['row']}_col{pos['col']}"
+            f"_y{pos['source_y_mm']:.2f}_z{pos['source_z_mm']:.2f}".replace(".", "p")
+        )
+        log(
+            f"[{pos['point_index']}/9] Running source y={pos['source_y_mm']:.2f} mm, "
+            f"z={pos['source_z_mm']:.2f} mm"
+        )
+        result_dir = run_simulation(point_settings, log=log, result_dir=point_dir)
+        point_dirs.append(str(result_dir))
+        data = np.load(Path(result_dir) / "pmcx_obj_result.npz", allow_pickle=True)
+        cubes.append(np.asarray(data["tpsf_cube_irf_norm_yzt"], dtype=float))
+        raw_cubes.append(np.asarray(data["tpsf_cube_raw_yzt"], dtype=float))
+        sum_norm_cubes.append(np.asarray(data["tpsf_cube_irf_sum_norm_yzt"], dtype=float))
+
+    scan_cube = np.stack(cubes, axis=0)
+    scan_raw_cube = np.stack(raw_cubes, axis=0)
+    scan_sum_norm_cube = np.stack(sum_norm_cubes, axis=0)
+    intensity = np.sum(scan_cube, axis=3)
+
+    np.save(scan_dir / "scan_tpsf_cube_9x32x32xt.npy", scan_cube)
+    np.save(scan_dir / "scan_tpsf_cube_raw_9x32x32xt.npy", scan_raw_cube)
+    np.save(scan_dir / "scan_tpsf_cube_sum_norm_9x32x32xt.npy", scan_sum_norm_cube)
+    np.save(scan_dir / "scan_detector_intensity_9x32x32.npy", intensity)
+    np.savez(
+        scan_dir / "pmcx_obj_scan_result.npz",
+        scan_tpsf_cube_9x32x32xt=scan_cube,
+        scan_tpsf_cube_raw_9x32x32xt=scan_raw_cube,
+        scan_tpsf_cube_sum_norm_9x32x32xt=scan_sum_norm_cube,
+        scan_detector_intensity_9x32x32=intensity,
+        source_positions_yz_mm=np.asarray(
+            [[p["source_y_mm"], p["source_z_mm"]] for p in positions],
+            dtype=float,
+        ),
+        point_row_col=np.asarray([[p["row"], p["col"]] for p in positions], dtype=int),
+        point_dirs=np.asarray(point_dirs, dtype=object),
+        scan_center_yz_mm=np.asarray([center_y_mm, center_z_mm], dtype=float),
+        scan_spacing_mm=float(spacing_mm),
+    )
+    plot_scan_overview(scan_cube, positions, scan_dir / "scan_3x3_overview.png")
+
+    with open(scan_dir / "scan_settings_and_meta.json", "w", encoding="utf-8") as f:
+        json.dump(
+            json_ready(
+                {
+                    "settings": asdict(settings),
+                    "scan": {
+                        "center_y_mm": center_y_mm,
+                        "center_z_mm": center_z_mm,
+                        "spacing_mm": spacing_mm,
+                        "order": "row-major from top-left; z high to low, y low to high",
+                        "positions": positions,
+                    },
+                    "point_dirs": point_dirs,
+                    "cube_shape": scan_cube.shape,
+                }
+            ),
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    elapsed = time.perf_counter() - started
+    log(f"Saved 3 x 3 scan to {scan_dir}")
+    log(f"Scan cube shape: {scan_cube.shape}")
+    log(f"Finished scan in {elapsed:.1f}s")
+    return scan_dir
+
+
 class PMCXObjectWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PMCX Object Mask Simulation GUI")
         self.process = None
         self.current_result_dir = None
+        self.current_result_kind = "single"
         self.init_ui()
 
     def init_ui(self):
@@ -774,14 +930,20 @@ class PMCXObjectWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         self.run_btn = QPushButton("Run object simulation")
+        self.scan_btn = QPushButton("Run 3x3 source scan")
         self.stop_btn = QPushButton("Stop simulation")
         self.compare_btn = QPushButton("Compare result folder")
+        self.scan_viewer_btn = QPushButton("Open scan viewer")
         self.run_btn.clicked.connect(self.start_run)
+        self.scan_btn.clicked.connect(self.start_scan)
         self.stop_btn.clicked.connect(self.stop_run)
         self.compare_btn.clicked.connect(self.on_compare_clicked)
+        self.scan_viewer_btn.clicked.connect(self.open_scan_viewer)
         buttons.addWidget(self.run_btn)
+        buttons.addWidget(self.scan_btn)
         buttons.addWidget(self.stop_btn)
         buttons.addWidget(self.compare_btn)
+        buttons.addWidget(self.scan_viewer_btn)
         layout.addLayout(buttons)
         self.stop_btn.setEnabled(False)
 
@@ -795,7 +957,7 @@ class PMCXObjectWindow(QMainWindow):
     def sim_group(self):
         group = QGroupBox("PMCX simulation")
         form = QFormLayout(group)
-        self.nphoton = self.spin_int(1, 1_000_000_000, 10_000_000)
+        self.nphoton = self.spin_int(1, 1_000_000_000, 100_000_000)
         self.voxel = self.spin_float(0.1, 10, 1.0, 2)
         self.thickness = self.spin_float(1, 500, 50.0, 2)
         self.width = self.spin_float(1, 1000, 250.0, 2)
@@ -823,6 +985,9 @@ class PMCXObjectWindow(QMainWindow):
         form = QFormLayout(group)
         self.source_y = self.spin_float(0, 1000, 125.0, 2)
         self.source_z = self.spin_float(0, 1000, 105.0, 2)
+        self.scan_center_y = self.spin_float(0, 1000, 125.0, 2)
+        self.scan_center_z = self.spin_float(0, 1000, 105.0, 2)
+        self.scan_spacing = self.spin_float(0, 1000, 15.0, 2)
         self.det_center_y = self.spin_float(0, 1000, 125.0, 2)
         self.det_center_z = self.spin_float(0, 1000, 105.0, 2)
         self.obj_x = self.spin_float(0, 500, 25.0, 2)
@@ -834,6 +999,9 @@ class PMCXObjectWindow(QMainWindow):
         for label, widget in [
             ("source y mm", self.source_y),
             ("source height z mm", self.source_z),
+            ("3x3 scan center y mm", self.scan_center_y),
+            ("3x3 scan center height z mm", self.scan_center_z),
+            ("3x3 scan spacing mm", self.scan_spacing),
             ("detector center y mm", self.det_center_y),
             ("detector center height z mm", self.det_center_z),
             ("object x depth mm", self.obj_x),
@@ -849,8 +1017,8 @@ class PMCXObjectWindow(QMainWindow):
     def optical_group(self):
         group = QGroupBox("Scatterer optical parameters")
         form = QFormLayout(group)
-        self.mua = self.spin_float(1e-6, 1, 0.0019, 6)
-        self.mus = self.spin_float(1e-4, 100, 1.4, 5)
+        self.mua = self.spin_float(1e-6, 1, 0.0009153, 6)
+        self.mus = self.spin_float(1e-4, 100, 1.7874, 5)
         self.g = self.spin_float(-0.99, 0.99, 0, 3)
         self.n = self.spin_float(1.0, 3.0, 1.05, 4)
         for label, widget in [
@@ -1011,8 +1179,10 @@ class PMCXObjectWindow(QMainWindow):
             return
 
         self.run_btn.setEnabled(False)
+        self.scan_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.current_result_dir = None
+        self.current_result_kind = "single"
         self.process = QProcess(self)
         self.process.setProgram(sys.executable)
         self.process.setArguments([str(Path(__file__).resolve()), "--run-settings", str(settings_path)])
@@ -1022,6 +1192,70 @@ class PMCXObjectWindow(QMainWindow):
         self.process.finished.connect(self.process_finished)
         self.process.errorOccurred.connect(self.process_error)
         self.append_log(f"Starting simulation subprocess with settings: {settings_path}")
+        self.process.start()
+
+    def start_scan(self):
+        try:
+            settings = self.collect_settings()
+            if not settings.irf_mat_path or not os.path.exists(settings.irf_mat_path):
+                raise ValueError("Please select a valid IRF MAT file.")
+            if not settings.mask_image_path or not os.path.exists(settings.mask_image_path):
+                raise ValueError("Please select a valid mask image file.")
+            if settings.fov_mm <= 0:
+                raise ValueError("FOV must be positive.")
+            if self.scan_spacing.value() <= 0:
+                raise ValueError("3x3 scan spacing must be positive.")
+
+            run_dir = Path(settings.output_root) / "_gui_runs"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = crop_cache_path(settings.output_root, settings.mask_image_path, settings.threshold)
+            if self.reuse_crop.isChecked() and cache_path.exists():
+                self.append_log(f"Reusing cached crop: {cache_path}")
+                mask, crop, quad_xy = load_crop_cache(cache_path)
+            else:
+                self.append_log("Click four corners corresponding to the 50 x 50 mm object area.")
+                mask, crop, quad_xy = select_quad_mask_from_image(settings.mask_image_path, settings.threshold)
+                save_crop_cache(cache_path, settings.mask_image_path, settings.threshold, mask, crop, quad_xy)
+                self.append_log(f"Saved crop cache: {cache_path}")
+
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            mask_path = run_dir / f"scan_mask_{stamp}.npy"
+            crop_path = run_dir / f"scan_crop_{stamp}.npy"
+            np.save(mask_path, mask)
+            np.save(crop_path, crop)
+            settings.experiment_mat_path = ""
+            settings.selected_mask_path = str(mask_path)
+            settings.selected_crop_path = str(crop_path)
+            settings.selected_quad_xy = np.asarray(quad_xy, dtype=float).tolist()
+            payload = {
+                "settings": asdict(settings),
+                "scan": {
+                    "center_y_mm": self.scan_center_y.value(),
+                    "center_z_mm": self.scan_center_z.value(),
+                    "spacing_mm": self.scan_spacing.value(),
+                },
+            }
+            settings_path = run_dir / f"scan_settings_{stamp}.json"
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid scan settings", str(exc))
+            return
+
+        self.run_btn.setEnabled(False)
+        self.scan_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.current_result_dir = None
+        self.current_result_kind = "scan"
+        self.process = QProcess(self)
+        self.process.setProgram(sys.executable)
+        self.process.setArguments([str(Path(__file__).resolve()), "--run-scan-settings", str(settings_path)])
+        self.process.setWorkingDirectory(str(Path(__file__).resolve().parent))
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.read_process_output)
+        self.process.finished.connect(self.process_finished)
+        self.process.errorOccurred.connect(self.process_error)
+        self.append_log(f"Starting 3x3 scan subprocess with settings: {settings_path}")
         self.process.start()
 
     def stop_run(self):
@@ -1040,15 +1274,23 @@ class PMCXObjectWindow(QMainWindow):
         for line in text.splitlines():
             if line.startswith("RESULT_DIR="):
                 self.current_result_dir = line.split("=", 1)[1].strip()
+                self.current_result_kind = "single"
+            elif line.startswith("SCAN_DIR="):
+                self.current_result_dir = line.split("=", 1)[1].strip()
+                self.current_result_kind = "scan"
             self.append_log(line)
 
     def process_finished(self, exit_code, exit_status):
         self.run_btn.setEnabled(True)
+        self.scan_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         if exit_code == 0 and self.current_result_dir:
             self.append_log(f"Finished. Result folder: {self.current_result_dir}")
-            self.try_auto_compare(self.current_result_dir)
-            QMessageBox.information(self, "Simulation finished", f"Saved to:\n{self.current_result_dir}")
+            if self.current_result_kind == "single":
+                self.try_auto_compare(self.current_result_dir)
+                QMessageBox.information(self, "Simulation finished", f"Saved to:\n{self.current_result_dir}")
+            else:
+                QMessageBox.information(self, "3x3 scan finished", f"Saved to:\n{self.current_result_dir}")
         else:
             message = f"Simulation subprocess exited with code {exit_code}, status {exit_status.name}"
             self.append_log(f"[ERROR] {message}")
@@ -1057,6 +1299,7 @@ class PMCXObjectWindow(QMainWindow):
 
     def process_error(self, error):
         self.run_btn.setEnabled(True)
+        self.scan_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         message = f"Simulation subprocess error: {error.name}"
         self.append_log(f"[ERROR] {message}")
@@ -1076,6 +1319,19 @@ class PMCXObjectWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Compare failed", str(exc))
             self.append_log(f"[ERROR] Compare failed: {exc}")
+
+    def open_scan_viewer(self):
+        viewer_path = Path(__file__).resolve().with_name("pmcx_obj_scan_viewer.py")
+        if not viewer_path.exists():
+            QMessageBox.critical(self, "Viewer missing", f"Cannot find {viewer_path}")
+            return
+
+        args = [str(viewer_path)]
+        if self.current_result_kind == "scan" and self.current_result_dir:
+            args.append(self.current_result_dir)
+        ok = QProcess.startDetached(sys.executable, args, str(Path(__file__).resolve().parent))
+        if not ok:
+            QMessageBox.critical(self, "Viewer failed", "Could not start scan viewer.")
 
     def compare_result_folder(self, folder=None):
         if folder is None:
@@ -1137,6 +1393,13 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--run-settings":
         try:
             run_from_settings_file(sys.argv[2])
+        except Exception as exc:
+            print(f"ERROR: {exc}", flush=True)
+            sys.exit(1)
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == "--run-scan-settings":
+        try:
+            run_scan_from_settings_file(sys.argv[2])
         except Exception as exc:
             print(f"ERROR: {exc}", flush=True)
             sys.exit(1)
