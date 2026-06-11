@@ -1,8 +1,9 @@
-function my_display_hist(histgram)
+function my_display_hist(histgram, displayOptions)
 %MY_DISPLAY_HIST Interactive viewer for a 3D histogram cube.
 %
 % Usage:
 %   my_display_hist(histgram)
+%   my_display_hist(histgram, displayOptions)
 %
 % Input:
 %   histgram:
@@ -15,7 +16,7 @@ function my_display_hist(histgram)
 %
 % Display:
 %   Left:
-%       accumulated intensity image = sum(histgram, 3)
+%       intensity image from sum(histgram, 3) or max(histgram, [], 3)
 %
 %   Right:
 %       histogram curve of the pixel currently under the mouse.
@@ -27,6 +28,10 @@ function my_display_hist(histgram)
     %% ---------------- Input check ----------------
     if nargin < 1
         error('Usage: my_display_hist(histgram)');
+    end
+
+    if nargin < 2 || isempty(displayOptions)
+        displayOptions = struct();
     end
 
     if ndims(histgram) ~= 3
@@ -42,13 +47,55 @@ function my_display_hist(histgram)
     histgram = double(histgram);
     histgram(~isfinite(histgram)) = 0;
 
+    if ~isfield(displayOptions, 'imageMode') || isempty(displayOptions.imageMode)
+        displayOptions.imageMode = 'sum';
+    end
+
+    if ~isfield(displayOptions, 'smoothCurves') || isempty(displayOptions.smoothCurves)
+        displayOptions.smoothCurves = false;
+    end
+
+    if ~isfield(displayOptions, 'smoothWindow') || isempty(displayOptions.smoothWindow)
+        displayOptions.smoothWindow = 5;
+    end
+
+    imageMode = lower(string(displayOptions.imageMode));
+    if imageMode == "total"
+        imageMode = "sum";
+    end
+
+    if imageMode ~= "sum" && imageMode ~= "peak"
+        error('displayOptions.imageMode must be "sum" or "peak".');
+    end
+
+    smoothCurves = logical(displayOptions.smoothCurves);
+    smoothWindow = max(1, round(double(displayOptions.smoothWindow)));
+    if mod(smoothWindow, 2) == 0
+        smoothWindow = smoothWindow + 1;
+    end
+
+    if smoothCurves && smoothWindow > 1
+        histgram = movmean(histgram, smoothWindow, 3);
+    end
+
     %% ---------------- Gaussian fit display settings ----------------
     % Change this value to adjust the fitted Gaussian contour level.
     % 0.60 means offset + 60% of the fitted Gaussian amplitude.
     gaussianContourFraction = 0.60;
 
     %% ---------------- Prepare image and x-axis ----------------
-    intensityImage = sum(histgram, 3);
+    if imageMode == "peak"
+        intensityImage = max(histgram, [], 3);
+        intensityTitle = 'Peak photon count';
+    else
+        intensityImage = sum(histgram, 3);
+        intensityTitle = 'Accumulated photon count';
+    end
+
+    if smoothCurves
+        intensityTitle = sprintf('%s (smoothed)', intensityTitle);
+    end
+
     [gaussianCenterX, gaussianCenterY, fittedGaussianImage, gaussianContourLevel] = ...
         fitGaussianCenter2D(intensityImage, gaussianContourFraction);
 
@@ -82,7 +129,7 @@ function my_display_hist(histgram)
     colormap(axImg, 'jet');
     colorbar(axImg);
 
-    title(axImg, 'Accumulated photon count');
+    title(axImg, intensityTitle);
     xlabel(axImg, 'X pixel');
     ylabel(axImg, 'Y pixel');
 
@@ -189,6 +236,7 @@ function my_display_hist(histgram)
         selectedCurve = selectedCurve(:).';
 
         totalCounts = sum(selectedCurve);
+        peakCounts = max(selectedCurve);
 
         set(hCurve, 'XData', binAxis, 'YData', selectedCurve);
 
@@ -205,7 +253,7 @@ function my_display_hist(histgram)
 
         set(txtX, 'String', sprintf('X: %d', xpos));
         set(txtY, 'String', sprintf('Y: %d', ypos));
-        set(txtSum, 'String', sprintf('Total counts: %.0f', totalCounts));
+        set(txtSum, 'String', sprintf('Total: %.3g   Peak: %.3g', totalCounts, peakCounts));
 
         set(hMarker, 'XData', xpos, 'YData', ypos);
 

@@ -6,7 +6,7 @@ Run with:
 
 Or call:
     from pmcx_3x3_curve_compare_gui import pmcx_3x3_curve_compare_gui
-    pmcx_3x3_curve_compare_gui(exp_folder, sim_folder)
+    pmcx_3x3_curve_compare_gui(exp_folder, sim_folder, smooth_experiment=False, smooth_window_bins=5)
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -243,6 +244,25 @@ def normalize_curve_set(curves: np.ndarray) -> np.ndarray:
     return curves / max_value if max_value > 0 else curves
 
 
+def smooth_curve_set(curves: np.ndarray, window_bins: int) -> np.ndarray:
+    curves = np.asarray(curves, dtype=float).copy()
+    curves[~np.isfinite(curves)] = 0
+    window_bins = int(window_bins)
+    if window_bins <= 1 or curves.ndim != 2 or curves.shape[1] <= 1:
+        return curves
+
+    window_bins = min(window_bins, curves.shape[1])
+    if window_bins % 2 == 0:
+        window_bins -= 1
+    if window_bins <= 1:
+        return curves
+
+    pad = window_bins // 2
+    kernel = np.ones(window_bins, dtype=float) / float(window_bins)
+    padded = np.pad(curves, ((0, 0), (pad, pad)), mode="edge")
+    return np.apply_along_axis(lambda row: np.convolve(row, kernel, mode="valid"), 1, padded)
+
+
 def default_hot_pixel_mask(ny: int, nx: int) -> np.ndarray:
     if ny != 32 or nx != 32:
         raise ValueError("Default hot/dark pixel mask is only defined for 32 x 32 histograms.")
@@ -394,16 +414,22 @@ def sum_selected_pixels(cube: np.ndarray, rows0: np.ndarray, cols0: np.ndarray) 
 
 
 class CurveCompareWindow(QMainWindow):
-    def __init__(self, exp_folder: str | None = None, sim_folder: str | None = None):
+    def __init__(
+        self,
+        exp_folder: str | None = None,
+        sim_folder: str | None = None,
+        smooth_experiment: bool = False,
+        smooth_window_bins: int = 5,
+    ):
         super().__init__()
         self.setWindowTitle("3x3 Experiment vs PMCX Curve Compare")
         self.exp_cube = None
         self.sim_cube = None
         self.exp_labels = []
         self.sim_labels = []
-        self.init_ui(exp_folder, sim_folder)
+        self.init_ui(exp_folder, sim_folder, smooth_experiment, smooth_window_bins)
 
-    def init_ui(self, exp_folder, sim_folder):
+    def init_ui(self, exp_folder, sim_folder, smooth_experiment, smooth_window_bins):
         central = QWidget()
         layout = QVBoxLayout(central)
 
@@ -430,6 +456,14 @@ class CurveCompareWindow(QMainWindow):
         self.same_y_check = QCheckBox("same y")
         self.same_y_check.setChecked(True)
         self.log_y_check = QCheckBox("log y")
+        self.exp_smooth_check = QCheckBox("smooth experiment")
+        self.exp_smooth_window = QSpinBox()
+        self.exp_smooth_window.setRange(1, 999)
+        self.exp_smooth_window.setSingleStep(2)
+        self.exp_smooth_window.setValue(int(smooth_window_bins))
+        self.exp_smooth_window.setMaximumWidth(72)
+        self.exp_smooth_check.setChecked(bool(smooth_experiment))
+        self.exp_smooth_window.setEnabled(bool(smooth_experiment))
         load_btn = QPushButton("Load folders")
         plot_btn = QPushButton("Plot comparison")
         exp_maps_btn = QPushButton("Show experiment maps")
@@ -442,12 +476,18 @@ class CurveCompareWindow(QMainWindow):
         self.col_edit.editingFinished.connect(self.plot_comparison)
         self.same_y_check.stateChanged.connect(self.plot_comparison)
         self.log_y_check.stateChanged.connect(self.plot_comparison)
+        self.exp_smooth_check.stateChanged.connect(lambda state: self.exp_smooth_window.setEnabled(bool(state)))
+        self.exp_smooth_check.stateChanged.connect(self.plot_comparison)
+        self.exp_smooth_window.valueChanged.connect(self.plot_comparison)
         controls.addWidget(QLabel("Rows Y"))
         controls.addWidget(self.row_edit)
         controls.addWidget(QLabel("Cols X"))
         controls.addWidget(self.col_edit)
         controls.addWidget(self.same_y_check)
         controls.addWidget(self.log_y_check)
+        controls.addWidget(self.exp_smooth_check)
+        controls.addWidget(QLabel("bins"))
+        controls.addWidget(self.exp_smooth_window)
         controls.addWidget(load_btn)
         controls.addWidget(plot_btn)
         controls.addWidget(exp_maps_btn)
@@ -509,6 +549,8 @@ class CurveCompareWindow(QMainWindow):
             )
         exp_curves = exp_curves[:, :common_bins]
         sim_curves = sim_curves[:, :common_bins]
+        if self.exp_smooth_check.isChecked():
+            exp_curves = smooth_curve_set(exp_curves, self.exp_smooth_window.value())
         return normalize_curve_set(exp_curves), normalize_curve_set(sim_curves), rows0, cols0
 
     def plot_comparison(self, *_):
@@ -549,13 +591,16 @@ class CurveCompareWindow(QMainWindow):
         self.figure.suptitle(
             f"Raw-read -> selected-pixel sum -> per-folder global max normalization | "
             f"Rows Y={self.row_edit.text().strip()}, Cols X={self.col_edit.text().strip()}, "
-            f"pixels summed={len(rows0) * len(cols0)}",
+            f"pixels summed={len(rows0) * len(cols0)}, "
+            f"exp smoothing={'on' if self.exp_smooth_check.isChecked() else 'off'}"
+            f"{' (' + str(self.exp_smooth_window.value()) + ' bins)' if self.exp_smooth_check.isChecked() else ''}",
             fontsize=11,
         )
         self.canvas.draw_idle()
         self.log(
             f"Plotted comparison: rows={self.row_edit.text().strip()}, cols={self.col_edit.text().strip()}, "
-            f"bins={exp_curves.shape[1]}"
+            f"bins={exp_curves.shape[1]}, "
+            f"exp_smoothing={'on' if self.exp_smooth_check.isChecked() else 'off'}"
         )
 
     def show_intensity_maps(self, source: str):
@@ -618,12 +663,17 @@ class CurveCompareWindow(QMainWindow):
         self._child_windows.append(win)
 
 
-def pmcx_3x3_curve_compare_gui(exp_folder: str | None = None, sim_folder: str | None = None):
+def pmcx_3x3_curve_compare_gui(
+    exp_folder: str | None = None,
+    sim_folder: str | None = None,
+    smooth_experiment: bool = False,
+    smooth_window_bins: int = 5,
+):
     app = QApplication.instance()
     owns_app = app is None
     if app is None:
         app = QApplication([])
-    win = CurveCompareWindow(exp_folder, sim_folder)
+    win = CurveCompareWindow(exp_folder, sim_folder, smooth_experiment, smooth_window_bins)
     win.show()
     if owns_app:
         app.exec()

@@ -26,7 +26,8 @@ pf_setNumberAccumulations(pf32, 1)
 expo_time = 2;   % us or camera-defined unit
 pf_setExposure(pf32, expo_time)
 
-laser_rep_rate = 80.33e6;   % Hz
+% laser_rep_rate = 80.33e6;   % Hz
+laser_rep_rate = 20e6;   % Hz
 
 num_of_frames = 1e5;        % frames per group
 num_groups = 50;             % number of repeated acquisitions, change freely
@@ -91,6 +92,10 @@ my_display_hist(hist_current)
 % my_display_hist(hist_avg)
 % my_display_hist(hist_sum)
 
+filename = fullfile("series", "series_" + string(datetime("now","Format","yyyyMMdd_HHmmss")) + "" ,".mat");
+save(filename, "series");,
+figure()
+imagesc(max(series,[],3))
 %%
 
 pf_close(pf32);
@@ -109,3 +114,9 @@ end
 
 my_display_hist(rebin_hist_time(hist_sum/9,2))
 
+%% check the series.mat
+load("series.mat")
+center = squeeze(series(1,1,:));
+center(find(center==0)) = [];
+histogram(center,236)
+max(center)

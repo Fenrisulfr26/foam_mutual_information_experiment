@@ -334,7 +334,7 @@ class FitEngine:
         cfg["detpos"] = self.detpos
         cfg["issave2pt"] = 0
         cfg.pop("outputtype", None)
-        cfg.pop("debuglevel", None)
+        # cfg.pop("debuglevel", None) # display the prograss bar
 
         res = pmcx_sim.pmcx.mcxlab(cfg)
         cube = detp_to_selected_cube(res, cfg, self.selected_indices, nt=self.exp_cube.shape[2])
@@ -658,8 +658,8 @@ class PMCXFitWindow(QMainWindow):
             r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\3x3_grid_scan_20260520_202613_deg_neg3_exp_2us_frames_100000_avg_20\hist_2us_100000_avg20_point05_center_cal.mat"
         )
         self.exp_point_index = self.spin_int(1, 100, 5)
-        self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF.mat")
-        self.output_root = QLineEdit(str(Path.cwd() / "fit_results"))
+        self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF_20260601_165629_deg_2_exp_2us_frames_100000_avg_1\hist_2us_100000_avg1_point05_center_obj.mat")
+        self.output_root = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\MCX_simulation\fit_results")
         self.add_path_row(path_layout, 0, "Experiment MAT", self.exp_path)
         path_layout.addWidget(QLabel("4D experiment point index"), 1, 0)
         path_layout.addWidget(self.exp_point_index, 1, 1)
@@ -710,7 +710,7 @@ class PMCXFitWindow(QMainWindow):
     def sim_group(self):
         group = QGroupBox("PMCX simulation")
         form = QFormLayout(group)
-        self.nphoton = self.spin_int(1, 1_000_000_000, 50_000_000)
+        self.nphoton = self.spin_int(1, 1_000_000_000, 500_000_000)
         self.voxel = self.spin_float(0.1, 10, 1.0, 2)
         self.thickness = self.spin_float(1, 500, 50.0, 2)
         self.width = self.spin_float(1, 1000, 250.0, 2)
@@ -740,7 +740,7 @@ class PMCXFitWindow(QMainWindow):
         form = QFormLayout(group)
         self.mua0 = self.spin_float(1e-6, 1, 0.0019, 6)
         self.mus0 = self.spin_float(1e-4, 100, 1.4, 5)
-        self.n0 = self.spin_float(1.0, 3.0, 1.58, 4)
+        self.n0 = self.spin_float(1.0, 3.0, 1.05, 4)
         self.mua_min = self.spin_float(1e-6, 1, 1e-5, 6)
         self.mua_max = self.spin_float(1e-6, 1, 0.1, 6)
         self.mus_min = self.spin_float(1e-4, 100, 0.1, 5)

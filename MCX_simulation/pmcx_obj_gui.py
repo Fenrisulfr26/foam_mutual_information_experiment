@@ -464,6 +464,8 @@ def make_object_cfg(settings: ObjSimSettings, mask: np.ndarray):
         "issave2pt": 0,
         "issavedet": 1,
         "savedetflag": "dp",
+        "debuglevel": "P"
+
     }
     meta = {
         "volume_shape_voxels": (nx, ny, nz),
@@ -627,10 +629,20 @@ def run_simulation(settings: ObjSimSettings, log=print, result_dir: str | Path |
         mask = np.load(settings.selected_mask_path).astype(np.uint8)
         crop = np.load(settings.selected_crop_path) if settings.selected_crop_path and os.path.exists(settings.selected_crop_path) else mask
         quad_xy = np.asarray(settings.selected_quad_xy, dtype=float)
-    else:
+        object_present = bool(np.any(mask == 0))
+    elif settings.mask_image_path:
         log("Select four corner points from mask image...")
         mask, crop, quad_xy = select_quad_mask_from_image(settings.mask_image_path, settings.threshold)
+        object_present = bool(np.any(mask == 0))
+    else:
+        log("No target image selected; running a homogeneous scatterer simulation without an object.")
+        mask = np.ones((2, 2), dtype=np.uint8)
+        crop = mask.copy()
+        quad_xy = np.empty((0, 2), dtype=float)
+        object_present = False
     cfg, meta, mask_zy = make_object_cfg(settings, mask)
+    meta["object_present"] = object_present
+    meta["object_mode"] = "mask_image" if object_present else "homogeneous_scatterer_no_object"
 
     log(f"Volume shape: {meta['volume_shape_voxels']}, object slice x={meta['object_x_index']}")
     log(f"Object mask black pixels as vol=0: {int(np.count_nonzero(mask_zy == 0))}")
@@ -827,7 +839,7 @@ def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: f
         point_dirs.append(str(result_dir))
         data = np.load(Path(result_dir) / "pmcx_obj_result.npz", allow_pickle=True)
         cubes.append(np.asarray(data["tpsf_cube_irf_norm_yzt"], dtype=float))
-        raw_cubes.append(np.asarray(data["tpsf_cube_raw_yzt"], dtype=float))
+        raw_cubes.append(np.asarray(data["tpsf_cube_irf_yzt"], dtype=float))
         sum_norm_cubes.append(np.asarray(data["tpsf_cube_irf_sum_norm_yzt"], dtype=float))
 
     scan_cube = np.stack(cubes, axis=0)
@@ -837,12 +849,14 @@ def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: f
 
     np.save(scan_dir / "scan_tpsf_cube_9x32x32xt.npy", scan_cube)
     np.save(scan_dir / "scan_tpsf_cube_raw_9x32x32xt.npy", scan_raw_cube)
+    np.save(scan_dir / "scan_tpsf_cube_irf_raw_9x32x32xt.npy", scan_raw_cube)
     np.save(scan_dir / "scan_tpsf_cube_sum_norm_9x32x32xt.npy", scan_sum_norm_cube)
     np.save(scan_dir / "scan_detector_intensity_9x32x32.npy", intensity)
     np.savez(
         scan_dir / "pmcx_obj_scan_result.npz",
         scan_tpsf_cube_9x32x32xt=scan_cube,
         scan_tpsf_cube_raw_9x32x32xt=scan_raw_cube,
+        scan_tpsf_cube_irf_raw_9x32x32xt=scan_raw_cube,
         scan_tpsf_cube_sum_norm_9x32x32xt=scan_sum_norm_cube,
         scan_detector_intensity_9x32x32=intensity,
         source_positions_yz_mm=np.asarray(
@@ -902,10 +916,11 @@ class PMCXObjectWindow(QMainWindow):
         self.exp_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data")
         self.exp_point_index = self.spin_int(1, 100, 1)
         self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF_20260601_165629_deg_2_exp_2us_frames_100000_avg_1\hist_2us_100000_avg1_point05_center_obj.mat")
-        self.mask_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\MCX_simulation\obj_figure")
+        self.mask_path = QLineEdit("")
+        self.mask_path.setPlaceholderText("Optional: leave empty for homogeneous scatterer without an object")
         self.reuse_crop = QCheckBox("Reuse cached crop for this image")
         self.reuse_crop.setChecked(True)
-        self.output_root = QLineEdit(str(Path.cwd() / "obj_sim_results"))
+        self.output_root = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\MCX_simulation\obj_sim_results")
         self.add_path_row(path_layout, 0, "Experiment MAT", self.exp_path, "MAT files (*.mat);;All files (*)")
         path_layout.addWidget(QLabel("4D experiment point index"), 1, 0)
         path_layout.addWidget(self.exp_point_index, 1, 1)
@@ -1149,28 +1164,35 @@ class PMCXObjectWindow(QMainWindow):
                 raise ValueError("Please select a valid experiment MAT file, or leave it empty.")
             if not settings.irf_mat_path or not os.path.exists(settings.irf_mat_path):
                 raise ValueError("Please select a valid IRF MAT file.")
-            if not settings.mask_image_path or not os.path.exists(settings.mask_image_path):
-                raise ValueError("Please select a valid mask image file.")
+            if settings.mask_image_path and not os.path.isfile(settings.mask_image_path):
+                raise ValueError("Target image must be a valid image file, or leave it empty for no object.")
             if settings.fov_mm <= 0:
                 raise ValueError("FOV must be positive.")
             run_dir = Path(settings.output_root) / "_gui_runs"
             run_dir.mkdir(parents=True, exist_ok=True)
-            cache_path = crop_cache_path(settings.output_root, settings.mask_image_path, settings.threshold)
-            if self.reuse_crop.isChecked() and cache_path.exists():
-                self.append_log(f"Reusing cached crop: {cache_path}")
-                mask, crop, quad_xy = load_crop_cache(cache_path)
+            if not settings.mask_image_path:
+                self.append_log("No target image selected: using a homogeneous scatterer without an object.")
+                settings.selected_mask_path = ""
+                settings.selected_crop_path = ""
+                settings.selected_quad_xy = []
             else:
-                self.append_log("Click four corners corresponding to the 50 x 50 mm object area.")
-                mask, crop, quad_xy = select_quad_mask_from_image(settings.mask_image_path, settings.threshold)
-                save_crop_cache(cache_path, settings.mask_image_path, settings.threshold, mask, crop, quad_xy)
-                self.append_log(f"Saved crop cache: {cache_path}")
-            mask_path = run_dir / f"mask_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npy"
-            crop_path = run_dir / f"crop_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npy"
-            np.save(mask_path, mask)
-            np.save(crop_path, crop)
-            settings.selected_mask_path = str(mask_path)
-            settings.selected_crop_path = str(crop_path)
-            settings.selected_quad_xy = np.asarray(quad_xy, dtype=float).tolist()
+                cache_path = crop_cache_path(settings.output_root, settings.mask_image_path, settings.threshold)
+                if self.reuse_crop.isChecked() and cache_path.exists():
+                    self.append_log(f"Reusing cached crop: {cache_path}")
+                    mask, crop, quad_xy = load_crop_cache(cache_path)
+                else:
+                    self.append_log("Click four corners corresponding to the 50 x 50 mm object area.")
+                    mask, crop, quad_xy = select_quad_mask_from_image(settings.mask_image_path, settings.threshold)
+                    save_crop_cache(cache_path, settings.mask_image_path, settings.threshold, mask, crop, quad_xy)
+                    self.append_log(f"Saved crop cache: {cache_path}")
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                mask_path = run_dir / f"mask_{stamp}.npy"
+                crop_path = run_dir / f"crop_{stamp}.npy"
+                np.save(mask_path, mask)
+                np.save(crop_path, crop)
+                settings.selected_mask_path = str(mask_path)
+                settings.selected_crop_path = str(crop_path)
+                settings.selected_quad_xy = np.asarray(quad_xy, dtype=float).tolist()
             settings_path = run_dir / f"settings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(asdict(settings), f, ensure_ascii=False, indent=2)
@@ -1199,8 +1221,8 @@ class PMCXObjectWindow(QMainWindow):
             settings = self.collect_settings()
             if not settings.irf_mat_path or not os.path.exists(settings.irf_mat_path):
                 raise ValueError("Please select a valid IRF MAT file.")
-            if not settings.mask_image_path or not os.path.exists(settings.mask_image_path):
-                raise ValueError("Please select a valid mask image file.")
+            if settings.mask_image_path and not os.path.isfile(settings.mask_image_path):
+                raise ValueError("Target image must be a valid image file, or leave it empty for no object.")
             if settings.fov_mm <= 0:
                 raise ValueError("FOV must be positive.")
             if self.scan_spacing.value() <= 0:
@@ -1208,25 +1230,30 @@ class PMCXObjectWindow(QMainWindow):
 
             run_dir = Path(settings.output_root) / "_gui_runs"
             run_dir.mkdir(parents=True, exist_ok=True)
-            cache_path = crop_cache_path(settings.output_root, settings.mask_image_path, settings.threshold)
-            if self.reuse_crop.isChecked() and cache_path.exists():
-                self.append_log(f"Reusing cached crop: {cache_path}")
-                mask, crop, quad_xy = load_crop_cache(cache_path)
-            else:
-                self.append_log("Click four corners corresponding to the 50 x 50 mm object area.")
-                mask, crop, quad_xy = select_quad_mask_from_image(settings.mask_image_path, settings.threshold)
-                save_crop_cache(cache_path, settings.mask_image_path, settings.threshold, mask, crop, quad_xy)
-                self.append_log(f"Saved crop cache: {cache_path}")
-
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            mask_path = run_dir / f"scan_mask_{stamp}.npy"
-            crop_path = run_dir / f"scan_crop_{stamp}.npy"
-            np.save(mask_path, mask)
-            np.save(crop_path, crop)
+            if not settings.mask_image_path:
+                self.append_log("No target image selected: 3x3 scan will use a homogeneous scatterer without an object.")
+                settings.selected_mask_path = ""
+                settings.selected_crop_path = ""
+                settings.selected_quad_xy = []
+            else:
+                cache_path = crop_cache_path(settings.output_root, settings.mask_image_path, settings.threshold)
+                if self.reuse_crop.isChecked() and cache_path.exists():
+                    self.append_log(f"Reusing cached crop: {cache_path}")
+                    mask, crop, quad_xy = load_crop_cache(cache_path)
+                else:
+                    self.append_log("Click four corners corresponding to the 50 x 50 mm object area.")
+                    mask, crop, quad_xy = select_quad_mask_from_image(settings.mask_image_path, settings.threshold)
+                    save_crop_cache(cache_path, settings.mask_image_path, settings.threshold, mask, crop, quad_xy)
+                    self.append_log(f"Saved crop cache: {cache_path}")
+                mask_path = run_dir / f"scan_mask_{stamp}.npy"
+                crop_path = run_dir / f"scan_crop_{stamp}.npy"
+                np.save(mask_path, mask)
+                np.save(crop_path, crop)
+                settings.selected_mask_path = str(mask_path)
+                settings.selected_crop_path = str(crop_path)
+                settings.selected_quad_xy = np.asarray(quad_xy, dtype=float).tolist()
             settings.experiment_mat_path = ""
-            settings.selected_mask_path = str(mask_path)
-            settings.selected_crop_path = str(crop_path)
-            settings.selected_quad_xy = np.asarray(quad_xy, dtype=float).tolist()
             payload = {
                 "settings": asdict(settings),
                 "scan": {

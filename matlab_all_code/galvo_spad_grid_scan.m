@@ -24,6 +24,7 @@ DEFAULT_LASER_DEGREE = 2;
 DEFAULT_EXPO_TIME_US = 2;
 DEFAULT_NUM_FRAMES = 1e5;
 DEFAULT_HIST_REPEATS = 1;
+DEFAULT_AVERAGE_MODE = 'pointwise';
 DEFAULT_LASER_REP_FREQ_HZ = 80.33e6;
 DEFAULT_GALVO_SETTLE_S = 0.2;
 DEFAULT_DISPLAY_EACH_HIST = false;
@@ -147,22 +148,30 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         addLabel(handles.paramPanel, xLabel, y0 - 6*dy, 'Laser degree');
         handles.degreeEdit = addEdit(handles.paramPanel, xEdit, y0 - 6*dy, editW, num2str(DEFAULT_LASER_DEGREE));
 
+        addLabel(handles.paramPanel, xLabel, y0 - 7*dy, '平均方式');
+        handles.averageModePopup = uicontrol(handles.paramPanel, 'Style', 'popupmenu', ...
+            'Units', 'pixels', ...
+            'Position', [xEdit, y0 - 7*dy, editW, 24], ...
+            'String', {'每点连续平均', '整轮重复平均'}, ...
+            'UserData', {'pointwise', 'roundwise'}, ...
+            'Value', find(strcmp({'pointwise', 'roundwise'}, DEFAULT_AVERAGE_MODE), 1));
+
         handles.displayHistCheck = uicontrol(handles.paramPanel, 'Style', 'checkbox', ...
             'Units', 'pixels', ...
-            'Position', [18, 122, 150, 22], ...
+            'Position', [18, 88, 150, 22], ...
             'Value', DEFAULT_DISPLAY_EACH_HIST, ...
             'String', '每点显示 hist');
 
         handles.overwriteCheck = uicontrol(handles.paramPanel, 'Style', 'checkbox', ...
             'Units', 'pixels', ...
-            'Position', [175, 122, 150, 22], ...
+            'Position', [175, 88, 150, 22], ...
             'Value', DEFAULT_ALLOW_OVERWRITE, ...
             'String', '允许覆盖');
 
-        addLabel(handles.paramPanel, xLabel, 88, '实验备注');
+        addLabel(handles.paramPanel, xLabel, 60, '实验备注');
         handles.noteEdit = uicontrol(handles.paramPanel, 'Style', 'edit', ...
             'Units', 'pixels', ...
-            'Position', [18, 18, 320, 68], ...
+            'Position', [18, 18, 320, 40], ...
             'HorizontalAlignment', 'left', ...
             'Max', 2, ...
             'Min', 0, ...
@@ -424,6 +433,21 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
     function phaseLog = acquireGridPhase(phaseName, pf32, afg, ...
             pointNames, pointIds, scanPointsV, cfg, outputDir)
 
+        switch cfg.averageMode
+            case 'pointwise'
+                phaseLog = acquireGridPhasePointwise( ...
+                    phaseName, pf32, afg, pointNames, pointIds, scanPointsV, cfg, outputDir);
+            case 'roundwise'
+                phaseLog = acquireGridPhaseRoundwise( ...
+                    phaseName, pf32, afg, pointNames, pointIds, scanPointsV, cfg, outputDir);
+            otherwise
+                error('Unknown average mode: %s', cfg.averageMode);
+        end
+    end
+
+    function phaseLog = acquireGridPhasePointwise(phaseName, pf32, afg, ...
+            pointNames, pointIds, scanPointsV, cfg, outputDir)
+
         selectedPointIndices = cfg.selectedPointIndices;
         numSelectedPoints = numel(selectedPointIndices);
         phaseLog = repmat(blankScanInfo(), numSelectedPoints, 1);
@@ -460,6 +484,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
             scanInfo.expo_time_us = cfg.expoTimeUs;
             scanInfo.num_frames = cfg.numFrames;
             scanInfo.hist_repeats = cfg.histRepeats;
+            scanInfo.average_mode = cfg.averageMode;
             scanInfo.laser_rep_freq_hz = cfg.laserRepFreqHz;
             scanInfo.laser_degree = cfg.laserDegree;
             scanInfo.elapsed_s = elapsedS;
@@ -489,6 +514,114 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
 
             logMessage(sprintf('[%s] 已保存：%s，总耗时 %.2f s。', ...
                 upper(phaseName), fileName, elapsedS));
+        end
+    end
+
+    function phaseLog = acquireGridPhaseRoundwise(phaseName, pf32, afg, ...
+            pointNames, pointIds, scanPointsV, cfg, outputDir)
+
+        selectedPointIndices = cfg.selectedPointIndices;
+        numSelectedPoints = numel(selectedPointIndices);
+        phaseLog = repmat(blankScanInfo(), numSelectedPoints, 1);
+        histSums = cell(numSelectedPoints, 1);
+        timeAxes = cell(numSelectedPoints, 1);
+        binEdges = cell(numSelectedPoints, 1);
+        repeatElapsedByPoint = zeros(cfg.histRepeats, numSelectedPoints);
+        pointTotalTimer = zeros(numSelectedPoints, 1);
+
+        logMessage(sprintf('[%s] 使用整轮重复平均：每轮扫描 %d 个点，共重复 %d 轮。', ...
+            upper(phaseName), numSelectedPoints, cfg.histRepeats));
+
+        for repIdx = 1:cfg.histRepeats
+            logMessage(sprintf('[%s] 开始第 %d/%d 轮完整扫描。', ...
+                upper(phaseName), repIdx, cfg.histRepeats));
+
+            for selectedIdx = 1:numSelectedPoints
+                pointIdx = selectedPointIndices(selectedIdx);
+                highlightPoint(pointIdx, [1.00, 0.93, 0.55]);
+
+                targetVoltageX = scanPointsV(pointIdx, 1);
+                targetVoltageY = scanPointsV(pointIdx, 2);
+                writeGalvoVoltage(afg, targetVoltageX, targetVoltageY);
+
+                if cfg.galvoSettleS > 0
+                    pause(cfg.galvoSettleS);
+                end
+
+                logMessage(sprintf('[%s] 轮 %d/%d，点 %d/%d：实际点 %d (%s), X=%.3f V, Y=%.3f V，采集 %.0f 帧...', ...
+                    upper(phaseName), repIdx, cfg.histRepeats, selectedIdx, numSelectedPoints, ...
+                    pointIdx, pointNames{pointIdx}, targetVoltageX, targetVoltageY, cfg.numFrames));
+
+                pointTic = tic;
+                [histOne, timeAxis_ns, binEdges_ns, elapsedS] = acquireSingleHist( ...
+                    pf32, cfg.numFrames, cfg.laserRepFreqHz);
+                pointTotalTimer(selectedIdx) = pointTotalTimer(selectedIdx) + toc(pointTic);
+                repeatElapsedByPoint(repIdx, selectedIdx) = elapsedS;
+
+                if isempty(histSums{selectedIdx})
+                    histSums{selectedIdx} = double(histOne);
+                    timeAxes{selectedIdx} = timeAxis_ns;
+                    binEdges{selectedIdx} = binEdges_ns;
+                else
+                    if ~isequal(size(histOne), size(histSums{selectedIdx}))
+                        error('Histogram size mismatch at point %d, round %d.', pointIdx, repIdx);
+                    end
+                    histSums{selectedIdx} = histSums{selectedIdx} + double(histOne);
+                end
+
+                clear histOne;
+            end
+        end
+
+        for selectedIdx = 1:numSelectedPoints
+            pointIdx = selectedPointIndices(selectedIdx);
+            targetVoltageX = scanPointsV(pointIdx, 1);
+            targetVoltageY = scanPointsV(pointIdx, 2);
+            hist = histSums{selectedIdx} ./ cfg.histRepeats;
+            timeAxis_ns = timeAxes{selectedIdx};
+            binEdges_ns = binEdges{selectedIdx};
+            repeatElapsedS = repeatElapsedByPoint(:, selectedIdx);
+            elapsedS = pointTotalTimer(selectedIdx);
+
+            scanInfo = blankScanInfo();
+            scanInfo.phase = phaseName;
+            scanInfo.point_index = pointIdx;
+            scanInfo.point_name = pointNames{pointIdx};
+            scanInfo.point_id = pointIds{pointIdx};
+            scanInfo.target_voltage_x_v = targetVoltageX;
+            scanInfo.target_voltage_y_v = targetVoltageY;
+            scanInfo.expo_time_us = cfg.expoTimeUs;
+            scanInfo.num_frames = cfg.numFrames;
+            scanInfo.hist_repeats = cfg.histRepeats;
+            scanInfo.average_mode = cfg.averageMode;
+            scanInfo.laser_rep_freq_hz = cfg.laserRepFreqHz;
+            scanInfo.laser_degree = cfg.laserDegree;
+            scanInfo.elapsed_s = elapsedS;
+            scanInfo.repeat_elapsed_s = repeatElapsedS;
+            scanInfo.acquired_at = timestampText();
+
+            fileName = sprintf('hist_%dus_%g_avg%d_point%02d_%s_%s.mat', ...
+                cfg.expoTimeUs, cfg.numFrames, cfg.histRepeats, ...
+                pointIdx, pointIds{pointIdx}, phaseName);
+            filePath = fullfile(outputDir, fileName);
+            scanInfo.file = char(filePath);
+
+            if exist(filePath, 'file') && ~cfg.allowOverwrite
+                error('Output file already exists: %s', filePath);
+            end
+
+            save(filePath, 'hist', 'timeAxis_ns', 'binEdges_ns', 'scanInfo');
+
+            if cfg.displayEachHist
+                my_display_hist(correctHistForIntensityDisplay(hist));
+                drawnow;
+            end
+
+            phaseLog(selectedIdx, 1) = scanInfo;
+            highlightPoint(pointIdx, [0.70, 0.90, 0.70]);
+            logMessage(sprintf('[%s] 已保存整轮平均结果：%s，总采集耗时 %.2f s。', ...
+                upper(phaseName), fileName, elapsedS));
+            clear hist;
         end
     end
 
@@ -525,12 +658,8 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
             logMessage(sprintf('[%s] 点 %d: hist %d/%d，采集 %.0f 帧...', ...
                 upper(phaseName), pointIdx, repIdx, histRepeats, numFrames));
 
-            tic;
-            series = pf_getMultipleFrames(pf32, numFrames);
-            repeatElapsedS(repIdx) = toc;
-
-            [histOne, timeAxis_ns, binEdges_ns] = series2hist(series, laserRepFreqHz);
-            clear series;
+            [histOne, timeAxis_ns, binEdges_ns, repeatElapsedS(repIdx)] = acquireSingleHist( ...
+                pf32, numFrames, laserRepFreqHz);
 
             if isempty(histSum)
                 histSum = double(histOne);
@@ -542,6 +671,18 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         end
 
         histAvg = histSum ./ histRepeats;
+    end
+
+    function [histOne, timeAxis_ns, binEdges_ns, elapsedS] = acquireSingleHist( ...
+            pf32, numFrames, laserRepFreqHz)
+
+        tic;
+        series = pf_getMultipleFrames(pf32, numFrames);
+        elapsedS = toc;
+
+        [histOne, timeAxis_ns, binEdges_ns] = series2hist(series, laserRepFreqHz);
+        histOne = double(histOne);
+        clear series;
     end
 
 %% --- Config / metadata ---
@@ -556,6 +697,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         cfg.laserDegree = readFiniteNumber(handles.degreeEdit, 'Laser degree');
         cfg.displayEachHist = logical(get(handles.displayHistCheck, 'Value'));
         cfg.allowOverwrite = logical(get(handles.overwriteCheck, 'Value'));
+        cfg.averageMode = readAverageMode();
         cfg.experimentNote = readMultilineText(handles.noteEdit);
         cfg.selectedPointIndices = readSelectedPointIndices();
 
@@ -603,6 +745,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         metadata.expo_time_us = cfg.expoTimeUs;
         metadata.num_frames = cfg.numFrames;
         metadata.hist_repeats = cfg.histRepeats;
+        metadata.average_mode = cfg.averageMode;
         metadata.laser_rep_freq_hz = cfg.laserRepFreqHz;
         metadata.galvo_settle_s = cfg.galvoSettleS;
         metadata.allow_overwrite = cfg.allowOverwrite;
@@ -717,6 +860,12 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
                 selectedPointIndices(end + 1) = pointIdx; %#ok<AGROW>
             end
         end
+    end
+
+    function averageMode = readAverageMode()
+        modeTags = get(handles.averageModePopup, 'UserData');
+        modeIdx = get(handles.averageModePopup, 'Value');
+        averageMode = modeTags{modeIdx};
     end
 
     function phaseLog = getLatestPhaseLogForVisualization()
@@ -1034,6 +1183,7 @@ function scanInfo = blankScanInfo()
         'expo_time_us', [], ...
         'num_frames', [], ...
         'hist_repeats', [], ...
+        'average_mode', '', ...
         'laser_rep_freq_hz', [], ...
         'laser_degree', [], ...
         'elapsed_s', [], ...

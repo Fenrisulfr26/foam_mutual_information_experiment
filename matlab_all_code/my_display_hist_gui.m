@@ -1,5 +1,5 @@
 function my_display_hist_gui()
-%MY_DISPLAY_HIST_GUI Select a MAT file and display its hist variable.
+%MY_DISPLAY_HIST_GUI Select a MAT file and display its histogram variable.
 %
 % Usage:
 %   my_display_hist_gui
@@ -7,12 +7,14 @@ function my_display_hist_gui()
 % The selected MAT file should contain a 3D histogram variable. If a
 % variable named "hist" exists, it is selected automatically.
 
+    selectedFile = "";
+
     fig = uifigure( ...
         'Name', 'Display Histogram From File', ...
-        'Position', [320, 260, 680, 360]);
+        'Position', [320, 220, 720, 430]);
 
-    grid = uigridlayout(fig, [6, 1]);
-    grid.RowHeight = {44, 34, 34, 30, '1x', 40};
+    grid = uigridlayout(fig, [7, 1]);
+    grid.RowHeight = {44, 34, 34, 34, 34, '1x', 40};
     grid.Padding = [14, 14, 14, 14];
     grid.RowSpacing = 10;
 
@@ -22,57 +24,84 @@ function my_display_hist_gui()
     buttonGrid.ColumnSpacing = 10;
 
     uibutton(buttonGrid, ...
-        'Text', '选择文件', ...
+        'Text', 'Select file', ...
         'ButtonPushedFcn', @selectFile);
 
     btnDisplay = uibutton(buttonGrid, ...
-        'Text', '展示', ...
+        'Text', 'Display', ...
         'Enable', 'off', ...
         'ButtonPushedFcn', @displaySelectedHist);
 
     lblStatus = uilabel(buttonGrid, ...
-        'Text', '未选择文件', ...
+        'Text', 'No file selected', ...
         'HorizontalAlignment', 'right');
 
     lblFile = uilabel(grid, ...
-        'Text', '文件：', ...
+        'Text', 'File:', ...
         'Interpreter', 'none');
 
     variableGrid = uigridlayout(grid, [1, 2]);
-    variableGrid.ColumnWidth = {80, '1x'};
+    variableGrid.ColumnWidth = {95, '1x'};
     variableGrid.Padding = [0, 0, 0, 0];
 
-    uilabel(variableGrid, 'Text', '变量：');
+    uilabel(variableGrid, 'Text', 'Variable:');
     variableDropDown = uidropdown(variableGrid, ...
         'Items', {}, ...
         'Enable', 'off');
 
-    chkDarkCorrected = uicheckbox(grid, ...
-        'Text', '展示暗噪声修正后结果', ...
+    imageModeGrid = uigridlayout(grid, [1, 2]);
+    imageModeGrid.ColumnWidth = {95, '1x'};
+    imageModeGrid.Padding = [0, 0, 0, 0];
+
+    uilabel(imageModeGrid, 'Text', 'Left image:');
+    imageModeDropDown = uidropdown(imageModeGrid, ...
+        'Items', {'Total intensity', 'Peak intensity'}, ...
+        'ItemsData', {'sum', 'peak'}, ...
+        'Value', 'sum');
+
+    optionGrid = uigridlayout(grid, [1, 3]);
+    optionGrid.ColumnWidth = {220, 190, '1x'};
+    optionGrid.Padding = [0, 0, 0, 0];
+    optionGrid.ColumnSpacing = 10;
+
+    chkDarkCorrected = uicheckbox(optionGrid, ...
+        'Text', 'Apply dark correction', ...
         'Value', false);
+
+    chkSmoothCurves = uicheckbox(optionGrid, ...
+        'Text', 'Smooth all curves', ...
+        'Value', false);
+
+    smoothGrid = uigridlayout(optionGrid, [1, 2]);
+    smoothGrid.ColumnWidth = {105, '1x'};
+    smoothGrid.Padding = [0, 0, 0, 0];
+
+    uilabel(smoothGrid, 'Text', 'Window bins:');
+    smoothWindowField = uieditfield(smoothGrid, 'numeric', ...
+        'Value', 5, ...
+        'Limits', [1, Inf], ...
+        'RoundFractionalValues', 'on');
 
     logArea = uitextarea(grid, ...
         'Editable', 'off', ...
-        'Value', {'请选择保存有 hist 的 MAT 文件。'});
+        'Value', {'Select a MAT file that contains a 3D hist variable.'});
 
     uilabel(grid, ...
-        'Text', '展示窗口仍使用 my_display_hist：左侧累计强度图，右侧鼠标所在像素的时间直方图。', ...
+        'Text', 'The left 32x32 image and the right pixel curve use the same dark-correction and smoothing settings.', ...
         'FontColor', [0.25, 0.25, 0.25]);
-
-    selectedFile = "";
 
     function selectFile(~, ~)
         [fileName, folderName] = uigetfile( ...
             {'*.mat', 'MAT-files (*.mat)'}, ...
-            '选择保存有 hist 的 MAT 文件');
+            'Select a MAT file that contains hist');
 
         if isequal(fileName, 0)
-            appendLog('已取消选择。');
+            appendLog('File selection canceled.');
             return;
         end
 
         selectedFile = string(fullfile(folderName, fileName));
-        lblFile.Text = ['文件：', char(selectedFile)];
+        lblFile.Text = ['File: ', char(selectedFile)];
 
         try
             vars = whos('-file', char(selectedFile));
@@ -88,8 +117,8 @@ function my_display_hist_gui()
                 variableDropDown.Items = {};
                 variableDropDown.Enable = 'off';
                 btnDisplay.Enable = 'off';
-                lblStatus.Text = '没有 3D 变量';
-                appendLog('这个文件里没有找到 3D histogram 变量。');
+                lblStatus.Text = 'No 3D variable';
+                appendLog('No 3D histogram variable was found in this file.');
                 return;
             end
 
@@ -103,20 +132,20 @@ function my_display_hist_gui()
             end
 
             btnDisplay.Enable = 'on';
-            lblStatus.Text = '已选择文件';
-            appendLog(sprintf('找到 %d 个 3D 变量。', numel(candidates)));
+            lblStatus.Text = 'File selected';
+            appendLog(sprintf('Found %d candidate 3D variable(s).', numel(candidates)));
         catch ME
             variableDropDown.Items = {};
             variableDropDown.Enable = 'off';
             btnDisplay.Enable = 'off';
-            lblStatus.Text = '读取失败';
+            lblStatus.Text = 'Read failed';
             appendLog(ME.message);
         end
     end
 
     function displaySelectedHist(~, ~)
         if strlength(selectedFile) == 0
-            appendLog('请先选择文件。');
+            appendLog('Select a file first.');
             return;
         end
 
@@ -124,17 +153,24 @@ function my_display_hist_gui()
         try
             data = load(char(selectedFile), varName);
             histgram = data.(varName);
+            darkText = 'off';
 
             if chkDarkCorrected.Value
                 [histgram, correctionInfo] = correct_hot_dark_pixels(histgram);
-                my_display_hist(histgram);
-                appendLog(sprintf('已展示暗噪声修正后的变量 %s，尺寸 %s，修正 %d 个像素。', ...
-                    varName, mat2str(size(histgram)), correctionInfo.numHotPixels));
-                return;
+                darkText = sprintf('on, %d pixels corrected', correctionInfo.numHotPixels);
             end
 
-            my_display_hist(histgram);
-            appendLog(sprintf('已展示变量 %s，尺寸 %s。', varName, mat2str(size(histgram))));
+            displayOptions = struct();
+            displayOptions.imageMode = imageModeDropDown.Value;
+            displayOptions.smoothCurves = chkSmoothCurves.Value;
+            displayOptions.smoothWindow = smoothWindowField.Value;
+
+            my_display_hist(histgram, displayOptions);
+
+            appendLog(sprintf(['Displayed %s, size %s, left image=%s, ', ...
+                'smoothing=%s, dark correction=%s.'], ...
+                varName, mat2str(size(histgram)), imageModeDropDown.Value, ...
+                onOffText(chkSmoothCurves.Value), darkText));
         catch ME
             appendLog(ME.message);
         end
@@ -149,5 +185,13 @@ function my_display_hist_gui()
         timestamp = string(datetime('now', 'Format', 'HH:mm:ss'));
         logArea.Value = [oldValue; {sprintf('[%s] %s', timestamp, message)}];
         scroll(logArea, 'bottom');
+    end
+end
+
+function textValue = onOffText(flag)
+    if flag
+        textValue = 'on';
+    else
+        textValue = 'off';
     end
 end
