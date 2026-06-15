@@ -198,6 +198,8 @@ def make_foam_slab_cfg(
         # keep default unless you specifically want reflection/refraction behavior changed.
         # You can later add cfg["bc"] if needed.
         "debuglevel": "P",
+
+        "maxdetphoton": 100_000_000,
     }
 
     meta = {

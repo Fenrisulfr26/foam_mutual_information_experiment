@@ -48,6 +48,10 @@ DEFAULT_SIM_FOLDER = (
     r"F:\OneDrive\foam_imaging_project\experiment_setup\MCX_simulation\obj_sim_results"
     r"\20260603_105147_obj_pmcx_3x3_scan"
 )
+DEFAULT_TIME_COMPENSATION_PATH = (
+    r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\IRF"
+    r"\IRF_noLens_10avg_20260612_2210_compensation.mat"
+)
 POINT_NAMES = [
     "left top",
     "top center",
@@ -60,6 +64,7 @@ POINT_NAMES = [
     "right bottom",
 ]
 MAT_PREFERRED_VARS = ("hist", "cal", "data", "histogram")
+COMPENSATION_PREFERRED_VARS = ("compensation_matrix", "compensation", "offsets", "time_offsets", "shift_matrix")
 DEFAULT_HOT_PIXELS_1BASED = np.asarray(
     [
         [1, 8],
@@ -263,6 +268,50 @@ def smooth_curve_set(curves: np.ndarray, window_bins: int) -> np.ndarray:
     return np.apply_along_axis(lambda row: np.convolve(row, kernel, mode="valid"), 1, padded)
 
 
+def load_compensation_matrix(path: str | Path) -> tuple[np.ndarray, str]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Time compensation MAT not found: {path}")
+
+    mat = loadmat(path)
+    var_name = next((name for name in COMPENSATION_PREFERRED_VARS if name in mat), None)
+    if var_name is None:
+        best_name, best_size = None, -1
+        for name in public_mat_vars(mat):
+            arr = np.asarray(mat[name]).squeeze()
+            if arr.ndim == 2 and arr.size > best_size:
+                best_name, best_size = name, arr.size
+        var_name = best_name
+    if var_name is None:
+        raise ValueError(f"No public 2D compensation matrix found in {path}")
+
+    offsets = np.asarray(mat[var_name], dtype=float).squeeze()
+    if offsets.shape != (32, 32):
+        raise ValueError(f"Expected compensation matrix shape (32,32), got {offsets.shape} from {var_name!r}")
+    offsets[~np.isfinite(offsets)] = 0
+    return offsets, var_name
+
+
+def apply_time_compensation_cube(cube: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+    cube = np.asarray(cube, dtype=float)
+    if cube.ndim != 3 or cube.shape[:2] != (32, 32):
+        raise ValueError(f"Expected experiment cube shape 32 x 32 x time, got {cube.shape}")
+
+    shifts = np.rint(offsets).astype(int)
+    compensated = np.empty_like(cube, dtype=float)
+    for row in range(32):
+        for col in range(32):
+            compensated[row, col, :] = np.roll(cube[row, col, :], shifts[row, col])
+    return compensated
+
+
+def apply_time_compensation_scan_cube(scan_cube: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+    scan_cube = np.asarray(scan_cube, dtype=float)
+    if scan_cube.ndim != 4 or scan_cube.shape[0] != 9:
+        raise ValueError(f"Expected scan cube shape 9 x 32 x 32 x time, got {scan_cube.shape}")
+    return np.stack([apply_time_compensation_cube(scan_cube[idx], offsets) for idx in range(9)], axis=0)
+
+
 def default_hot_pixel_mask(ny: int, nx: int) -> np.ndarray:
     if ny != 32 or nx != 32:
         raise ValueError("Default hot/dark pixel mask is only defined for 32 x 32 histograms.")
@@ -464,6 +513,11 @@ class CurveCompareWindow(QMainWindow):
         self.exp_smooth_window.setMaximumWidth(72)
         self.exp_smooth_check.setChecked(bool(smooth_experiment))
         self.exp_smooth_window.setEnabled(bool(smooth_experiment))
+        self.exp_comp_check = QCheckBox("compensate experiment time")
+        self.exp_comp_path = QLineEdit(DEFAULT_TIME_COMPENSATION_PATH)
+        self.exp_comp_path.setMinimumWidth(360)
+        comp_browse = QPushButton("Browse comp")
+        comp_browse.clicked.connect(lambda: self.browse_file(self.exp_comp_path, "Select time compensation MAT"))
         load_btn = QPushButton("Load folders")
         plot_btn = QPushButton("Plot comparison")
         exp_maps_btn = QPushButton("Show experiment maps")
@@ -479,6 +533,8 @@ class CurveCompareWindow(QMainWindow):
         self.exp_smooth_check.stateChanged.connect(lambda state: self.exp_smooth_window.setEnabled(bool(state)))
         self.exp_smooth_check.stateChanged.connect(self.plot_comparison)
         self.exp_smooth_window.valueChanged.connect(self.plot_comparison)
+        self.exp_comp_check.stateChanged.connect(self.plot_comparison)
+        self.exp_comp_path.editingFinished.connect(self.plot_comparison)
         controls.addWidget(QLabel("Rows Y"))
         controls.addWidget(self.row_edit)
         controls.addWidget(QLabel("Cols X"))
@@ -488,6 +544,9 @@ class CurveCompareWindow(QMainWindow):
         controls.addWidget(self.exp_smooth_check)
         controls.addWidget(QLabel("bins"))
         controls.addWidget(self.exp_smooth_window)
+        controls.addWidget(self.exp_comp_check)
+        controls.addWidget(self.exp_comp_path)
+        controls.addWidget(comp_browse)
         controls.addWidget(load_btn)
         controls.addWidget(plot_btn)
         controls.addWidget(exp_maps_btn)
@@ -514,6 +573,13 @@ class CurveCompareWindow(QMainWindow):
         if folder:
             line_edit.setText(folder)
 
+    def browse_file(self, line_edit: QLineEdit, title: str):
+        current = Path(line_edit.text().strip())
+        start = str(current.parent if current.exists() else Path.cwd())
+        path, _ = QFileDialog.getOpenFileName(self, title, str(start), "MAT files (*.mat);;All files (*)")
+        if path:
+            line_edit.setText(path)
+
     def log(self, text: str):
         self.log_box.append(text)
 
@@ -528,18 +594,31 @@ class CurveCompareWindow(QMainWindow):
             QMessageBox.critical(self, "Load failed", str(exc))
             self.log(f"[ERROR] Load failed: {exc}")
 
+    def experiment_cube_for_display(self):
+        if self.exp_cube is None:
+            return None
+        cube = self.exp_cube
+        if self.exp_comp_check.isChecked():
+            offsets, var_name = load_compensation_matrix(self.exp_comp_path.text().strip())
+            cube = apply_time_compensation_scan_cube(cube, offsets)
+        return cube
+
     def current_curves(self):
         if self.exp_cube is None or self.sim_cube is None:
             self.load_folders()
             if self.exp_cube is None or self.sim_cube is None:
                 return None
 
-        ny = min(self.exp_cube.shape[1], self.sim_cube.shape[1])
-        nx = min(self.exp_cube.shape[2], self.sim_cube.shape[2])
+        exp_cube = self.experiment_cube_for_display()
+        if exp_cube is None:
+            return None
+
+        ny = min(exp_cube.shape[1], self.sim_cube.shape[1])
+        nx = min(exp_cube.shape[2], self.sim_cube.shape[2])
         rows0 = parse_index_list(self.row_edit.text(), ny, "Rows Y")
         cols0 = parse_index_list(self.col_edit.text(), nx, "Cols X")
 
-        exp_curves = sum_selected_pixels(self.exp_cube, rows0, cols0)
+        exp_curves = sum_selected_pixels(exp_cube, rows0, cols0)
         sim_curves = sum_selected_pixels(self.sim_cube, rows0, cols0)
         common_bins = min(exp_curves.shape[1], sim_curves.shape[1])
         if exp_curves.shape[1] != sim_curves.shape[1]:
@@ -593,14 +672,16 @@ class CurveCompareWindow(QMainWindow):
             f"Rows Y={self.row_edit.text().strip()}, Cols X={self.col_edit.text().strip()}, "
             f"pixels summed={len(rows0) * len(cols0)}, "
             f"exp smoothing={'on' if self.exp_smooth_check.isChecked() else 'off'}"
-            f"{' (' + str(self.exp_smooth_window.value()) + ' bins)' if self.exp_smooth_check.isChecked() else ''}",
+            f"{' (' + str(self.exp_smooth_window.value()) + ' bins)' if self.exp_smooth_check.isChecked() else ''}, "
+            f"exp compensation={'on' if self.exp_comp_check.isChecked() else 'off'}",
             fontsize=11,
         )
         self.canvas.draw_idle()
         self.log(
             f"Plotted comparison: rows={self.row_edit.text().strip()}, cols={self.col_edit.text().strip()}, "
             f"bins={exp_curves.shape[1]}, "
-            f"exp_smoothing={'on' if self.exp_smooth_check.isChecked() else 'off'}"
+            f"exp_smoothing={'on' if self.exp_smooth_check.isChecked() else 'off'}, "
+            f"exp_compensation={'on' if self.exp_comp_check.isChecked() else 'off'}"
         )
 
     def show_intensity_maps(self, source: str):
@@ -608,8 +689,11 @@ class CurveCompareWindow(QMainWindow):
             if self.exp_cube is None or self.sim_cube is None:
                 self.load_folders()
             if source == "experiment":
-                cube = self.exp_cube
-                title = "Experiment 3x3 Intensity Maps"
+                cube = self.experiment_cube_for_display()
+                title = (
+                    "Experiment 3x3 Intensity Maps"
+                    + (" (time compensated)" if self.exp_comp_check.isChecked() else "")
+                )
                 color = "Experiment"
             else:
                 cube = self.sim_cube

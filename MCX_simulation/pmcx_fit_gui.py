@@ -41,6 +41,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from scipy.io import loadmat
+from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import OptimizeResult, curve_fit, differential_evolution, minimize
 
 import pmcx_sim
@@ -55,6 +57,10 @@ from pmcx_fit import (
 
 
 NUM_PIX = 32
+DEFAULT_TIME_COMPENSATION_PATH = (
+    r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\IRF"
+    r"\IRF_noLens_10avg_20260612_2210_compensation.mat"
+)
 
 
 @dataclass
@@ -94,6 +100,10 @@ class FitSettings:
     gpuid: int
     seed: int
     loss_func: str = "composite"
+    smooth_experiment: bool = False
+    smooth_sigma_bins: float = 1.0
+    apply_time_compensation: bool = False
+    time_compensation_mat_path: str = DEFAULT_TIME_COMPENSATION_PATH
 
 
 
@@ -131,7 +141,73 @@ def parse_pixel_selection(settings: FitSettings) -> list[tuple[int, int]]:
     return sorted(set(pixels))
 
 
-def load_experiment_cube(path: str, point_index: int) -> tuple[np.ndarray, str]:
+def _mat_public_vars(mat_dict):
+    return [k for k in mat_dict.keys() if not k.startswith("__")]
+
+
+def _auto_pick_main_var(mat_dict):
+    best_name, best_size = None, -1
+    for name in _mat_public_vars(mat_dict):
+        arr = np.asarray(mat_dict[name])
+        if arr.size > best_size:
+            best_name, best_size = name, arr.size
+    return best_name
+
+
+def load_compensation_matrix(path: str) -> tuple[np.ndarray, str]:
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(f"Time compensation MAT not found: {path}")
+
+    mat = loadmat(path)
+    preferred = ["compensation_matrix", "compensation", "offsets", "time_offsets", "shift_matrix"]
+    var = next((name for name in preferred if name in mat), None)
+    if var is None:
+        var = _auto_pick_main_var(mat)
+    if var is None:
+        raise ValueError(f"No public matrix variable found in {path}")
+
+    offsets = np.asarray(mat[var], dtype=float).squeeze()
+    if offsets.shape != (NUM_PIX, NUM_PIX):
+        raise ValueError(f"Expected compensation matrix shape (32,32), got {offsets.shape} from variable {var!r}")
+    offsets[~np.isfinite(offsets)] = 0
+    return offsets, var
+
+
+def apply_time_compensation(exp_cube: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+    compensated = np.empty_like(exp_cube, dtype=float)
+    shifts = np.rint(offsets).astype(int)
+    # MATLAB loadmat preserves matrix row/column order: exp_cube[row, col, time].
+    for row in range(NUM_PIX):
+        for col in range(NUM_PIX):
+            compensated[row, col, :] = np.roll(exp_cube[row, col, :], shifts[row, col])
+    return compensated
+
+
+def preprocess_experiment_cube(exp_cube: np.ndarray, settings: FitSettings) -> tuple[np.ndarray, dict]:
+    info = {
+        "smooth_experiment": bool(settings.smooth_experiment),
+        "smooth_sigma_bins": float(settings.smooth_sigma_bins),
+        "apply_time_compensation": bool(settings.apply_time_compensation),
+        "time_compensation_mat_path": settings.time_compensation_mat_path,
+        "time_compensation_variable": None,
+    }
+
+    out = np.asarray(exp_cube, dtype=float)
+    if settings.smooth_experiment and settings.smooth_sigma_bins > 0:
+        out = gaussian_filter1d(out, sigma=float(settings.smooth_sigma_bins), axis=2, mode="nearest")
+
+    if settings.apply_time_compensation:
+        offsets, var = load_compensation_matrix(settings.time_compensation_mat_path)
+        out = apply_time_compensation(out, offsets)
+        info["time_compensation_variable"] = var
+
+    out[~np.isfinite(out)] = 0
+    return out, info
+
+
+def load_experiment_cube(settings: FitSettings) -> tuple[np.ndarray, str, dict]:
+    path = settings.experiment_mat_path
+    point_index = settings.experiment_point_index
     exp_raw, exp_var = load_experiment_data(path)
     if exp_raw.ndim == 4:
         idx0 = point_index - 1
@@ -142,7 +218,8 @@ def load_experiment_cube(path: str, point_index: int) -> tuple[np.ndarray, str]:
         raise ValueError(f"Expected experiment shape (32,32,time), got {exp_raw.shape}")
     exp_raw = np.asarray(exp_raw, dtype=float)
     exp_raw[~np.isfinite(exp_raw)] = 0
-    return exp_raw, exp_var
+    exp_raw, preprocess_info = preprocess_experiment_cube(exp_raw, settings)
+    return exp_raw, exp_var, preprocess_info
 
 
 def selected_detector_positions(settings: FitSettings, selected_pixels: list[tuple[int, int]]):
@@ -273,7 +350,7 @@ class FitEngine:
         self.best_loss = np.inf
         self.best_params = None
         self.best_sim_cube = None
-        self.exp_cube, self.exp_var = load_experiment_cube(settings.experiment_mat_path, settings.experiment_point_index)
+        self.exp_cube, self.exp_var, self.exp_preprocess_info = load_experiment_cube(settings)
         self.irf, self.irf_var = load_irf_curve(settings.irf_mat_path, matlab_index=(16, 16))
         self.selected_pixels = parse_pixel_selection(settings)
         self.detpos, self.selected_indices, self.yy_mm, self.zz_mm = selected_detector_positions(
@@ -559,6 +636,7 @@ class FitEngine:
         metadata = {
             "settings": asdict(self.settings),
             "experiment_variable": self.exp_var,
+            "experiment_preprocessing": self.exp_preprocess_info,
             "irf_variable": self.irf_var,
             "selected_detector_count": int(len(self.selected_indices)),
             "selected_pixels_yx_zero_based": self.selected_pixels,
@@ -576,6 +654,11 @@ class FitEngine:
             f.write("================\n")
             f.write(f"experiment: {self.settings.experiment_mat_path}\n")
             f.write(f"irf: {self.settings.irf_mat_path}\n")
+            f.write(f"smooth_experiment: {self.settings.smooth_experiment}\n")
+            f.write(f"smooth_sigma_bins: {self.settings.smooth_sigma_bins:.6g}\n")
+            f.write(f"apply_time_compensation: {self.settings.apply_time_compensation}\n")
+            f.write(f"time_compensation_mat: {self.settings.time_compensation_mat_path}\n")
+            f.write(f"time_compensation_variable: {self.exp_preprocess_info.get('time_compensation_variable')}\n")
             f.write(f"optimizer: {self.settings.optimizer}\n")
             f.write(f"selected_detector_count: {len(self.selected_indices)}\n")
             f.write(f"rmse: {result.fun:.8e}\n")
@@ -658,13 +741,28 @@ class PMCXFitWindow(QMainWindow):
             r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\3x3_grid_scan_20260520_202613_deg_neg3_exp_2us_frames_100000_avg_20\hist_2us_100000_avg20_point05_center_cal.mat"
         )
         self.exp_point_index = self.spin_int(1, 100, 5)
-        self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF_20260601_165629_deg_2_exp_2us_frames_100000_avg_1\hist_2us_100000_avg1_point05_center_obj.mat")
+        self.irf_path = QLineEdit(r"F:/OneDrive/foam_imaging_project/experiment_setup/matlab_all_code/IRF/IRF_noLens_10avg_20260612_2210.mat")
+        self.smooth_experiment = QCheckBox("smooth experiment")
+        self.smooth_experiment.setChecked(False)
+        self.smooth_sigma = self.spin_float(0.0, 50.0, 1.0, 2)
+        self.apply_time_comp = QCheckBox("apply time compensation")
+        self.apply_time_comp.setChecked(False)
+        self.time_comp_path = QLineEdit(DEFAULT_TIME_COMPENSATION_PATH)
         self.output_root = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\MCX_simulation\fit_results")
         self.add_path_row(path_layout, 0, "Experiment MAT", self.exp_path)
         path_layout.addWidget(QLabel("4D experiment point index"), 1, 0)
         path_layout.addWidget(self.exp_point_index, 1, 1)
         self.add_path_row(path_layout, 2, "IRF MAT", self.irf_path)
-        self.add_dir_row(path_layout, 3, "Output root", self.output_root)
+        path_layout.addWidget(QLabel("smooth experiment"), 3, 0)
+        smooth_row = QHBoxLayout()
+        smooth_row.addWidget(self.smooth_experiment)
+        smooth_row.addWidget(QLabel("sigma bins"))
+        smooth_row.addWidget(self.smooth_sigma)
+        path_layout.addLayout(smooth_row, 3, 1)
+        path_layout.addWidget(QLabel("time compensation"), 4, 0)
+        path_layout.addWidget(self.apply_time_comp, 4, 1)
+        self.add_path_row(path_layout, 5, "Compensation MAT", self.time_comp_path)
+        self.add_dir_row(path_layout, 6, "Output root", self.output_root)
         layout.addWidget(paths)
 
         params_row = QHBoxLayout()
@@ -858,6 +956,10 @@ class PMCXFitWindow(QMainWindow):
             gpuid=self.gpuid.value(),
             seed=self.seed.value(),
             loss_func=self.loss_func.currentText(),
+            smooth_experiment=self.smooth_experiment.isChecked(),
+            smooth_sigma_bins=self.smooth_sigma.value(),
+            apply_time_compensation=self.apply_time_comp.isChecked(),
+            time_compensation_mat_path=self.time_comp_path.text().strip(),
         )
 
     def append_log(self, text):
@@ -870,6 +972,10 @@ class PMCXFitWindow(QMainWindow):
                 raise ValueError("Please select a valid experiment MAT file.")
             if not settings.irf_mat_path or not os.path.exists(settings.irf_mat_path):
                 raise ValueError("Please select a valid IRF MAT file.")
+            if settings.apply_time_compensation and (
+                not settings.time_compensation_mat_path or not os.path.exists(settings.time_compensation_mat_path)
+            ):
+                raise ValueError("Please select a valid time compensation MAT file.")
             parse_pixel_selection(settings)
             if settings.optimizer == "grid_search":
                 total = settings.grid_mua_steps * settings.grid_mus_steps

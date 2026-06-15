@@ -18,7 +18,8 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg" if "--run-settings" in sys.argv else "qtagg")
+HEADLESS_ARGS = {"--run-settings", "--run-scan-settings", "--run-multisource-settings"}
+matplotlib.use("Agg" if any(arg in sys.argv for arg in HEADLESS_ARGS) else "qtagg")
 import matplotlib.pyplot as plt
 import numpy as np
 from PyQt6.QtCore import QProcess
@@ -458,6 +459,7 @@ def make_object_cfg(settings: ObjSimSettings, mask: np.ndarray):
         "seed": settings.seed,
         "gpuid": settings.gpuid,
         "autopilot": 1,
+        "maxdetphoton": 100_000_000,
         # Only detected photon histories are needed for TPSF/intensity.
         # Avoid saving the full time-resolved fluence field, which is large
         # for a 50 x 250 x 250 x 227 grid and can crash the native MCX layer.
@@ -465,7 +467,6 @@ def make_object_cfg(settings: ObjSimSettings, mask: np.ndarray):
         "issavedet": 1,
         "savedetflag": "dp",
         "debuglevel": "P"
-
     }
     meta = {
         "volume_shape_voxels": (nx, ny, nz),
@@ -915,7 +916,7 @@ class PMCXObjectWindow(QMainWindow):
         path_layout = QGridLayout(paths)
         self.exp_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data")
         self.exp_point_index = self.spin_int(1, 100, 1)
-        self.irf_path = QLineEdit(r"F:\OneDrive\foam_imaging_project\experiment_setup\matlab_all_code\data\IRF_20260601_165629_deg_2_exp_2us_frames_100000_avg_1\hist_2us_100000_avg1_point05_center_obj.mat")
+        self.irf_path = QLineEdit(r"F:/OneDrive/foam_imaging_project/experiment_setup/matlab_all_code/IRF/IRF_noLens_10avg_20260612_2210.mat")
         self.mask_path = QLineEdit("")
         self.mask_path.setPlaceholderText("Optional: leave empty for homogeneous scatterer without an object")
         self.reuse_crop = QCheckBox("Reuse cached crop for this image")
