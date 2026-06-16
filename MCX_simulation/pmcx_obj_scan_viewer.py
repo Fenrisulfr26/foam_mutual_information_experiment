@@ -53,7 +53,6 @@ POINT_NAMES = [
 ]
 CUBE_KEYS = {
     "max-normalized IRF cube": "scan_tpsf_cube_9x32x32xt",
-    "sum-normalized IRF cube": "scan_tpsf_cube_sum_norm_9x32x32xt",
     "raw TPSF cube": "scan_tpsf_cube_raw_9x32x32xt",
 }
 
@@ -199,11 +198,11 @@ class PMCXObjScanViewer(QMainWindow):
             return
 
         key = self.current_cube_key()
-        if key not in self.data.files:
-            QMessageBox.critical(self, "Missing cube", f"Cannot find {key} in {SCAN_FILE}")
+        try:
+            self.cube = self.load_cube(key)
+        except Exception as exc:
+            QMessageBox.critical(self, "Missing cube", str(exc))
             return
-
-        self.cube = np.asarray(self.data[key], dtype=float)
         if self.cube.ndim != 4 or self.cube.shape[0] != 9:
             QMessageBox.critical(self, "Invalid cube", f"Expected shape 9 x 32 x 32 x time, got {self.cube.shape}")
             return
@@ -251,6 +250,14 @@ class PMCXObjScanViewer(QMainWindow):
         self.update_selected_label()
         self.refresh_curves()
         self.log(f"Showing {key}, cube shape={self.cube.shape}")
+
+    def load_cube(self, key):
+        if self.data is not None and key in self.data.files:
+            return np.asarray(self.data[key], dtype=float)
+        npy_path = self.folder / f"{key}.npy"
+        if npy_path.exists():
+            return np.asarray(np.load(npy_path), dtype=float)
+        raise FileNotFoundError(f"Cannot find {key} in {SCAN_FILE} or {npy_path}")
 
     def on_click(self, event):
         if event.inaxes not in self.axes:

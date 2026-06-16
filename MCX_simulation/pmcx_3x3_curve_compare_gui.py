@@ -437,22 +437,65 @@ def load_simulation_scan_cube(folder: str | Path) -> tuple[np.ndarray, list[str]
         raise FileNotFoundError(f"Simulation folder not found: {folder}")
 
     npz_path = folder / "pmcx_obj_scan_result.npz"
+    meta_path = folder / "scan_settings_and_meta.json"
+    irf_norm_npy_path = folder / "scan_tpsf_cube_9x32x32xt.npy"
     raw_npy_path = folder / "scan_tpsf_cube_raw_9x32x32xt.npy"
+
+    storage_mode = None
     if npz_path.exists():
+        try:
+            with np.load(npz_path, allow_pickle=True) as data:
+                if "storage_mode" in data.files:
+                    storage_mode = str(np.asarray(data["storage_mode"]).item())
+        except Exception:
+            storage_mode = None
+    if storage_mode is None and meta_path.exists():
+        try:
+            import json
+
+            storage_mode = json.loads(meta_path.read_text(encoding="utf-8")).get("storage_mode")
+        except Exception:
+            storage_mode = None
+
+    is_new_raw_plus_irf_format = storage_mode == "raw_and_irf_global_max_norm_npy"
+
+    if is_new_raw_plus_irf_format and irf_norm_npy_path.exists():
+        cube = np.asarray(np.load(irf_norm_npy_path), dtype=float)
+        source_label = "IRF global max-normalized PMCX"
+    elif npz_path.exists():
         data = np.load(npz_path, allow_pickle=True)
-        if "scan_tpsf_cube_raw_9x32x32xt" not in data.files:
-            raise ValueError(f"Cannot find raw simulation cube in {npz_path}")
-        cube = np.asarray(data["scan_tpsf_cube_raw_9x32x32xt"], dtype=float)
+        if not is_new_raw_plus_irf_format and "scan_tpsf_cube_irf_raw_9x32x32xt" in data.files:
+            cube = np.asarray(data["scan_tpsf_cube_irf_raw_9x32x32xt"], dtype=float)
+            source_label = "legacy IRF unnormalized PMCX"
+        elif not is_new_raw_plus_irf_format and "scan_tpsf_cube_raw_9x32x32xt" in data.files:
+            # Legacy 3x3 scan used this name for IRF-convolved, unnormalized data.
+            cube = np.asarray(data["scan_tpsf_cube_raw_9x32x32xt"], dtype=float)
+            source_label = "legacy IRF unnormalized PMCX"
+        elif "scan_tpsf_cube_9x32x32xt" in data.files:
+            cube = np.asarray(data["scan_tpsf_cube_9x32x32xt"], dtype=float)
+            source_label = "IRF global max-normalized PMCX"
+        elif "scan_tpsf_cube_raw_9x32x32xt" in data.files:
+            cube = np.asarray(data["scan_tpsf_cube_raw_9x32x32xt"], dtype=float)
+            source_label = "raw PMCX"
+        elif raw_npy_path.exists():
+            cube = np.asarray(np.load(raw_npy_path), dtype=float)
+            source_label = "raw PMCX"
+        else:
+            raise ValueError(f"Cannot find simulation cube in {npz_path}, {irf_norm_npy_path}, or {raw_npy_path}")
+    elif irf_norm_npy_path.exists():
+        cube = np.asarray(np.load(irf_norm_npy_path), dtype=float)
+        source_label = "IRF max-normalized PMCX"
     elif raw_npy_path.exists():
         cube = np.asarray(np.load(raw_npy_path), dtype=float)
+        source_label = "raw PMCX"
     else:
-        raise FileNotFoundError(f"Cannot find {npz_path} or {raw_npy_path}")
+        raise FileNotFoundError(f"Cannot find {npz_path}, {irf_norm_npy_path}, or {raw_npy_path}")
 
     if cube.ndim != 4 or cube.shape[0] != 9 or cube.shape[1] != 32 or cube.shape[2] != 32:
         raise ValueError(f"Expected simulation cube shape 9 x 32 x 32 x time, got {cube.shape}")
     cube = cube.copy()
     cube[~np.isfinite(cube)] = 0
-    labels = [f"P{idx:02d}: raw PMCX" for idx in range(1, 10)]
+    labels = [f"P{idx:02d}: {source_label}" for idx in range(1, 10)]
     return cube, labels
 
 
@@ -522,10 +565,12 @@ class CurveCompareWindow(QMainWindow):
         plot_btn = QPushButton("Plot comparison")
         exp_maps_btn = QPushButton("Show experiment maps")
         sim_maps_btn = QPushButton("Show simulation maps")
+        error_btn = QPushButton("Show error curves")
         load_btn.clicked.connect(self.load_folders)
         plot_btn.clicked.connect(self.plot_comparison)
         exp_maps_btn.clicked.connect(lambda: self.show_intensity_maps("experiment"))
         sim_maps_btn.clicked.connect(lambda: self.show_intensity_maps("simulation"))
+        error_btn.clicked.connect(self.show_error_curves)
         self.row_edit.editingFinished.connect(self.plot_comparison)
         self.col_edit.editingFinished.connect(self.plot_comparison)
         self.same_y_check.stateChanged.connect(self.plot_comparison)
@@ -551,6 +596,7 @@ class CurveCompareWindow(QMainWindow):
         controls.addWidget(plot_btn)
         controls.addWidget(exp_maps_btn)
         controls.addWidget(sim_maps_btn)
+        controls.addWidget(error_btn)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -745,6 +791,77 @@ class CurveCompareWindow(QMainWindow):
         if not hasattr(self, "_child_windows"):
             self._child_windows = []
         self._child_windows.append(win)
+
+    def show_error_curves(self):
+        try:
+            current = self.current_curves()
+            if current is None:
+                return
+            exp_curves, sim_curves, rows0, cols0 = current
+            error_curves = sim_curves - exp_curves
+            self.open_error_window(error_curves, exp_curves, sim_curves, rows0, cols0)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error view failed", str(exc))
+            self.log(f"[ERROR] Error view failed: {exc}")
+
+    def open_error_window(self, error_curves, exp_curves, sim_curves, rows0, cols0):
+        win = QMainWindow(self)
+        win.setWindowTitle("3x3 Simulation - Experiment Error Curves")
+        fig = Figure(figsize=(10.2, 8.0), constrained_layout=True)
+        canvas = FigureCanvas(fig)
+
+        x_axis = np.arange(error_curves.shape[1])
+        max_abs = float(np.nanmax(np.abs(error_curves))) if error_curves.size else 0.0
+        if max_abs <= 0:
+            max_abs = 1.0
+
+        rmse = np.sqrt(np.mean(error_curves**2, axis=1))
+        mae = np.mean(np.abs(error_curves), axis=1)
+        max_abs_each = np.max(np.abs(error_curves), axis=1)
+        corr = np.zeros(9, dtype=float)
+        for idx in range(9):
+            if np.std(exp_curves[idx]) > 0 and np.std(sim_curves[idx]) > 0:
+                corr[idx] = np.corrcoef(exp_curves[idx], sim_curves[idx])[0, 1]
+            else:
+                corr[idx] = np.nan
+
+        axes = []
+        for idx in range(9):
+            ax = fig.add_subplot(3, 3, idx + 1)
+            ax.plot(x_axis, error_curves[idx], color="tab:red", linewidth=1.2)
+            ax.axhline(0, color="0.25", linewidth=0.8)
+            ax.set_ylim(-max_abs * 1.08, max_abs * 1.08)
+            ax.set_title(
+                f"P{idx + 1:02d} {POINT_NAMES[idx]}\nRMSE={rmse[idx]:.4f}, MAE={mae[idx]:.4f}",
+                fontsize=8,
+            )
+            ax.grid(True)
+            ax.tick_params(labelsize=7)
+            if idx // 3 == 2:
+                ax.set_xlabel("Bin", fontsize=8)
+            if idx % 3 == 0:
+                ax.set_ylabel("Sim - Exp", fontsize=8)
+            axes.append(ax)
+
+        fig.suptitle(
+            f"Final normalized curve error | Rows Y={self.row_edit.text().strip()}, "
+            f"Cols X={self.col_edit.text().strip()}, pixels summed={len(rows0) * len(cols0)} | "
+            f"mean RMSE={np.nanmean(rmse):.4f}, mean MAE={np.nanmean(mae):.4f}, "
+            f"mean corr={np.nanmean(corr):.4f}",
+            fontsize=11,
+        )
+
+        win.setCentralWidget(canvas)
+        win.resize(1100, 880)
+        win.show()
+        if not hasattr(self, "_child_windows"):
+            self._child_windows = []
+        self._child_windows.append(win)
+        self.log(
+            "Error metrics: "
+            f"mean_RMSE={np.nanmean(rmse):.6g}, mean_MAE={np.nanmean(mae):.6g}, "
+            f"max_abs={np.nanmax(max_abs_each):.6g}, mean_corr={np.nanmean(corr):.6g}"
+        )
 
 
 def pmcx_3x3_curve_compare_gui(

@@ -38,13 +38,11 @@ from pmcx_obj_gui import (
     load_irf_curve,
     make_object_cfg,
     normalize_cube,
-    plot_intensity,
     plot_mask_preview,
     plot_scan_overview,
     save_crop_cache,
     scan_source_positions,
     select_quad_mask_from_image,
-    sum_normalize,
 )
 
 
@@ -86,24 +84,54 @@ def load_or_create_object_mask(settings: ObjSimSettings, log=print):
 
 def make_multisource_cfg(settings: ObjSimSettings, mask: np.ndarray, positions):
     cfg, meta, mask_zy = make_object_cfg(settings, mask)
-    source_positions_vox = [
+    hist_tstart = float(cfg["tstart"])
+    hist_tend = float(cfg["tend"])
+    hist_tstep = float(cfg["tstep"])
+    # Detected photon partial paths are enough for TPSF reconstruction. Keep
+    # MCX's internal gate count at 1 to avoid allocating a huge time-gated
+    # volume for the 50 x 250 x 250 slab.
+    cfg["tstep"] = hist_tend - hist_tstart
+    source_positions_vox = np.asarray(
+        [
+            [0.0, pos["source_y_mm"] / settings.voxel_size_mm, pos["source_z_mm"] / settings.voxel_size_mm]
+            for pos in positions
+        ],
+        dtype=np.float32,
+    )
+    source_directions = np.asarray([[1.0, 0.0, 0.0] for _ in positions], dtype=np.float32)
+    total_photons = int(settings.nphoton) * len(positions)
+    max_detected = min(max(total_photons, 1_000_000), 20_000_000)
+    cfg["srcpos"] = source_positions_vox
+    cfg["srcdir"] = source_directions
+    cfg["srcid"] = -1
+    cfg["nphoton"] = total_photons
+    cfg["maxdetphoton"] = int(max_detected)
+    meta_source_positions_vox = [
         [0.0, pos["source_y_mm"] / settings.voxel_size_mm, pos["source_z_mm"] / settings.voxel_size_mm]
         for pos in positions
     ]
-    cfg["srcpos"] = source_positions_vox
-    cfg["srcdir"] = [[1.0, 0.0, 0.0] for _ in positions]
-    cfg["srcid"] = -1
-    cfg["nphoton"] = int(settings.nphoton) * len(positions)
     meta["source_positions"] = positions
-    meta["srcpos_vox"] = source_positions_vox
+    meta["srcpos_vox"] = meta_source_positions_vox
     meta["num_sources"] = len(positions)
     meta["nphoton_per_source"] = int(settings.nphoton)
     meta["nphoton_total_submitted"] = int(cfg["nphoton"])
+    meta["maxdetphoton"] = int(cfg["maxdetphoton"])
     meta["srcid_mode"] = -1
+    meta["hist_tstart_s"] = hist_tstart
+    meta["hist_tend_s"] = hist_tend
+    meta["hist_tstep_s"] = hist_tstep
+    meta["pmcx_gate_tstep_s"] = float(cfg["tstep"])
     return cfg, meta, mask_zy
 
 
-def detp_to_source_detector_outputs(res, cfg, nt: int, num_sources: int):
+def detp_to_source_detector_outputs(
+    res,
+    cfg,
+    nt: int,
+    num_sources: int,
+    hist_tstart_s: float,
+    hist_tstep_s: float,
+):
     detp = res.get("detp") if isinstance(res, dict) else None
     if detp is None:
         raise ValueError("No detected photon data found in PMCX result.")
@@ -133,8 +161,8 @@ def detp_to_source_detector_outputs(res, cfg, nt: int, num_sources: int):
     media_n = prop[1 : 1 + ppath.shape[1], 3]
     tof_ns = np.sum(ppath * unit_mm * media_n[None, :], axis=1) / 299.792458
 
-    tstart_ns = float(cfg["tstart"]) * 1e9
-    tstep_ns = float(cfg["tstep"]) * 1e9
+    tstart_ns = float(hist_tstart_s) * 1e9
+    tstep_ns = float(hist_tstep_s) * 1e9
     edges = tstart_ns + np.arange(nt + 1) * tstep_ns
     t_idx = np.searchsorted(edges, tof_ns, side="right") - 1
     t_valid = (t_idx >= 0) & (t_idx < nt)
@@ -168,18 +196,22 @@ def run_multisource_simulation(
 
     log(
         "Running one PMCX simulation with 9 simultaneous sources: "
-        f"nphoton per source={settings.nphoton}, total submitted={cfg['nphoton']}"
+        f"nphoton per source={settings.nphoton}, total submitted={cfg['nphoton']}, "
+        f"maxdetphoton={cfg['maxdetphoton']}"
     )
+    log(f"srcpos shape={np.asarray(cfg['srcpos']).shape}, srcdir shape={np.asarray(cfg['srcdir']).shape}")
     log(f"Volume shape: {meta['volume_shape_voxels']}, object slice x={meta['object_x_index']}")
     res = pmcx_sim.pmcx.mcxlab(cfg)
     log("pmcx.mcxlab returned; splitting detected photons by source id...")
 
-    nt = int(np.ceil((cfg["tend"] - cfg["tstart"]) / cfg["tstep"]))
+    nt = int(np.ceil((meta["hist_tend_s"] - meta["hist_tstart_s"]) / meta["hist_tstep_s"]))
     intensity_raw, cubes_raw, source_detector_counts, detid, srcid, ppath = detp_to_source_detector_outputs(
         res,
         cfg,
         nt=nt,
         num_sources=len(positions),
+        hist_tstart_s=meta["hist_tstart_s"],
+        hist_tstep_s=meta["hist_tstep_s"],
     )
 
     log("Loading IRF and convolving source-separated TPSF cubes...")
@@ -190,10 +222,6 @@ def run_multisource_simulation(
         axis=0,
     )
     cubes_irf_norm = normalize_cube(cubes_irf)
-    cubes_irf_sum_norm = sum_normalize(cubes_irf)
-    intensity_irf_raw = np.sum(cubes_irf, axis=3)
-    intensity_irf_norm = np.sum(cubes_irf_norm, axis=3)
-    intensity_irf_sum_norm = np.sum(cubes_irf_sum_norm, axis=3)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_dir = Path(settings.output_root) / f"{timestamp}_obj_pmcx_3x3_multisource"
@@ -201,53 +229,34 @@ def run_multisource_simulation(
 
     plot_mask_preview(crop, mask, result_dir / "selected_mask_preview.png")
     plot_scan_overview(cubes_irf_norm, positions, result_dir / "multisource_3x3_overview.png")
-    np.save(result_dir / "multisource_tpsf_cube_raw_9x32x32xt.npy", cubes_raw)
-    np.save(result_dir / "multisource_tpsf_cube_irf_9x32x32xt.npy", cubes_irf)
-    np.save(result_dir / "multisource_tpsf_cube_irf_norm_9x32x32xt.npy", cubes_irf_norm)
-    np.save(result_dir / "multisource_tpsf_cube_irf_sum_norm_9x32x32xt.npy", cubes_irf_sum_norm)
-    np.save(result_dir / "multisource_detector_intensity_raw_9x32x32.npy", intensity_raw)
+    plot_scan_overview(cubes_irf_norm, positions, result_dir / "scan_3x3_overview.png")
+
+    # Compatibility with pmcx_obj_gui.py 3x3 scan outputs and
+    # pmcx_3x3_curve_compare_gui.py / pmcx_obj_scan_viewer.py readers.
+    np.save(result_dir / "scan_tpsf_cube_9x32x32xt.npy", cubes_irf_norm)
+    np.save(result_dir / "scan_tpsf_cube_raw_9x32x32xt.npy", cubes_raw)
     np.save(result_dir / "source_detector_counts_9x1024.npy", source_detector_counts)
     np.save(result_dir / "object_mask_zy.npy", mask_zy)
     np.save(result_dir / "selected_image_crop.npy", crop)
-    np.save(result_dir / "vol_uint8.npy", cfg["vol"])
-
-    for idx, pos in enumerate(positions):
-        point_name = f"source{idx + 1:02d}_row{pos['row']}_col{pos['col']}"
-        np.save(result_dir / f"{point_name}_tpsf_cube_raw_yzt.npy", cubes_raw[idx])
-        np.save(result_dir / f"{point_name}_tpsf_cube_irf_yzt.npy", cubes_irf[idx])
-        np.save(result_dir / f"{point_name}_tpsf_cube_irf_norm_yzt.npy", cubes_irf_norm[idx])
-        np.save(result_dir / f"{point_name}_detector_intensity_raw.npy", intensity_raw[idx])
-        np.save(result_dir / f"{point_name}_detector_intensity_irf_norm.npy", intensity_irf_norm[idx])
-        plot_intensity(intensity_irf_sum_norm[idx], result_dir / f"{point_name}_intensity_sum_normalized.png")
-        np.savez(
-            result_dir / f"{point_name}_pmcx_obj_multisource_result.npz",
-            tpsf_cube_raw_yzt=cubes_raw[idx],
-            tpsf_cube_irf_yzt=cubes_irf[idx],
-            tpsf_cube_irf_norm_yzt=cubes_irf_norm[idx],
-            tpsf_cube_irf_sum_norm_yzt=cubes_irf_sum_norm[idx],
-            detector_intensity_raw=intensity_raw[idx],
-            detector_intensity_irf_raw=intensity_irf_raw[idx],
-            detector_intensity_irf_norm=intensity_irf_norm[idx],
-            detector_intensity_irf_sum_norm=intensity_irf_sum_norm[idx],
-            source_position_yz_mm=np.asarray([pos["source_y_mm"], pos["source_z_mm"]], dtype=float),
-            source_index=idx + 1,
-        )
 
     np.savez(
         result_dir / "pmcx_obj_multisource_result.npz",
-        multisource_tpsf_cube_raw_9x32x32xt=cubes_raw,
-        multisource_tpsf_cube_irf_9x32x32xt=cubes_irf,
-        multisource_tpsf_cube_irf_norm_9x32x32xt=cubes_irf_norm,
-        multisource_tpsf_cube_irf_sum_norm_9x32x32xt=cubes_irf_sum_norm,
-        multisource_detector_intensity_raw_9x32x32=intensity_raw,
-        multisource_detector_intensity_irf_norm_9x32x32=intensity_irf_norm,
-        source_detector_counts_9x1024=source_detector_counts,
         source_positions_yz_mm=np.asarray([[p["source_y_mm"], p["source_z_mm"]] for p in positions], dtype=float),
         point_row_col=np.asarray([[p["row"], p["col"]] for p in positions], dtype=int),
-        detid=np.asarray(detid) if detid is not None else np.asarray([]),
-        srcid=np.asarray(srcid) if srcid is not None else np.asarray([]),
-        ppath=np.asarray(ppath) if ppath is not None else np.asarray([]),
         irf=irf,
+        irf_variable=irf_var,
+        period_bins=int(period_bins),
+        storage_mode="raw_and_irf_global_max_norm_npy",
+    )
+    np.savez(
+        result_dir / "pmcx_obj_scan_result.npz",
+        source_positions_yz_mm=np.asarray([[p["source_y_mm"], p["source_z_mm"]] for p in positions], dtype=float),
+        point_row_col=np.asarray([[p["row"], p["col"]] for p in positions], dtype=int),
+        point_dirs=np.asarray([], dtype=object),
+        scan_center_yz_mm=np.asarray([center_y_mm, center_z_mm], dtype=float),
+        scan_spacing_mm=float(spacing_mm),
+        acquisition_mode="simultaneous_multisource_split_by_srcid",
+        storage_mode="raw_and_irf_global_max_norm_npy",
         irf_variable=irf_var,
         period_bins=int(period_bins),
     )
@@ -261,6 +270,28 @@ def run_multisource_simulation(
                     "selected_quad_xy": quad_xy,
                     "source_positions": positions,
                     "output_note": "One PMCX run with 9 simultaneous sources; cubes split by detected photon srcid.",
+                }
+            ),
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    with open(result_dir / "scan_settings_and_meta.json", "w", encoding="utf-8") as f:
+        json.dump(
+            json_ready(
+                {
+                    "settings": asdict(settings),
+                    "scan": {
+                        "center_y_mm": center_y_mm,
+                        "center_z_mm": center_z_mm,
+                        "spacing_mm": spacing_mm,
+                        "order": "row-major from top-left; z high to low, y low to high",
+                        "positions": positions,
+                        "acquisition_mode": "simultaneous_multisource_split_by_srcid",
+                    },
+                    "point_dirs": [],
+                    "cube_shape": cubes_irf_norm.shape,
+                    "meta": meta,
                 }
             ),
             f,
@@ -306,6 +337,8 @@ class PMCXObjectMultiSourceWindow(PMCXObjectWindow):
         self.scan_btn.setVisible(False)
         self.compare_btn.setVisible(False)
         self.scan_viewer_btn.setVisible(False)
+        self.nphoton.setValue(1_000_000)
+        self.nphoton.setToolTip("Photons per source; the PMCX run submits this value times 9.")
 
     def start_multisource_run(self):
         try:

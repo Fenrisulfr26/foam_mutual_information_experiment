@@ -623,8 +623,7 @@ def plot_scan_overview(cubes, positions, out_path: Path):
     plt.close(fig)
 
 
-def run_simulation(settings: ObjSimSettings, log=print, result_dir: str | Path | None = None):
-    started = time.perf_counter()
+def load_or_create_object_mask(settings: ObjSimSettings, log=print):
     if settings.selected_mask_path and os.path.exists(settings.selected_mask_path):
         log("Loading selected binary mask...")
         mask = np.load(settings.selected_mask_path).astype(np.uint8)
@@ -641,6 +640,21 @@ def run_simulation(settings: ObjSimSettings, log=print, result_dir: str | Path |
         crop = mask.copy()
         quad_xy = np.empty((0, 2), dtype=float)
         object_present = False
+    return mask, crop, quad_xy, object_present
+
+
+def run_single_raw_tpsf(settings: ObjSimSettings, mask: np.ndarray, log=print):
+    cfg, meta, mask_zy = make_object_cfg(settings, mask)
+    log(f"Running raw PMCX TPSF at source y={settings.source_y_mm:.2f}, z={settings.source_z_mm:.2f}")
+    res = pmcx_sim.pmcx.mcxlab(cfg)
+    nt = int(np.ceil((cfg["tend"] - cfg["tstart"]) / cfg["tstep"]))
+    intensity_raw, cube_raw = detp_to_detector_outputs(res, cfg, nt=nt)
+    return intensity_raw, cube_raw, cfg, meta, mask_zy
+
+
+def run_simulation(settings: ObjSimSettings, log=print, result_dir: str | Path | None = None):
+    started = time.perf_counter()
+    mask, crop, quad_xy, object_present = load_or_create_object_mask(settings, log=log)
     cfg, meta, mask_zy = make_object_cfg(settings, mask)
     meta["object_present"] = object_present
     meta["object_mode"] = "mask_image" if object_present else "homogeneous_scatterer_no_object"
@@ -809,15 +823,13 @@ def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: f
     started = time.perf_counter()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     scan_dir = Path(settings.output_root) / f"{timestamp}_obj_pmcx_3x3_scan"
-    point_root = scan_dir / "point_runs"
     scan_dir.mkdir(parents=True, exist_ok=False)
-    point_root.mkdir(parents=True, exist_ok=False)
 
     positions = scan_source_positions(center_y_mm, center_z_mm, spacing_mm)
-    cubes = []
     raw_cubes = []
-    sum_norm_cubes = []
-    point_dirs = []
+    mask, crop, quad_xy, object_present = load_or_create_object_mask(settings, log=log)
+    first_meta = None
+    first_mask_zy = None
 
     log(
         "Starting 3 x 3 source scan: "
@@ -828,48 +840,44 @@ def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: f
         point_settings.source_y_mm = pos["source_y_mm"]
         point_settings.source_z_mm = pos["source_z_mm"]
         point_settings.seed = int(settings.seed) + pos["point_index"] - 1
-        point_dir = point_root / (
-            f"point{pos['point_index']:02d}_row{pos['row']}_col{pos['col']}"
-            f"_y{pos['source_y_mm']:.2f}_z{pos['source_z_mm']:.2f}".replace(".", "p")
-        )
         log(
             f"[{pos['point_index']}/9] Running source y={pos['source_y_mm']:.2f} mm, "
             f"z={pos['source_z_mm']:.2f} mm"
         )
-        result_dir = run_simulation(point_settings, log=log, result_dir=point_dir)
-        point_dirs.append(str(result_dir))
-        data = np.load(Path(result_dir) / "pmcx_obj_result.npz", allow_pickle=True)
-        cubes.append(np.asarray(data["tpsf_cube_irf_norm_yzt"], dtype=float))
-        raw_cubes.append(np.asarray(data["tpsf_cube_irf_yzt"], dtype=float))
-        sum_norm_cubes.append(np.asarray(data["tpsf_cube_irf_sum_norm_yzt"], dtype=float))
+        _intensity_raw, cube_raw, _cfg, meta, mask_zy = run_single_raw_tpsf(point_settings, mask, log=log)
+        if first_meta is None:
+            first_meta = meta
+            first_mask_zy = mask_zy
+        raw_cubes.append(cube_raw)
 
-    scan_cube = np.stack(cubes, axis=0)
     scan_raw_cube = np.stack(raw_cubes, axis=0)
-    scan_sum_norm_cube = np.stack(sum_norm_cubes, axis=0)
-    intensity = np.sum(scan_cube, axis=3)
+    log("Loading IRF and building global max-normalized IRF scan cube...")
+    irf, irf_var = load_irf_curve(settings.irf_mat_path, matlab_index=(16, 16))
+    scan_irf_cube = np.stack(
+        [convolve_irf_all_pixels_tcspc(scan_raw_cube[idx], irf, period_bins=scan_raw_cube.shape[3]) for idx in range(9)],
+        axis=0,
+    )
+    scan_irf_norm_cube = normalize_cube(scan_irf_cube)
 
-    np.save(scan_dir / "scan_tpsf_cube_9x32x32xt.npy", scan_cube)
+    np.save(scan_dir / "scan_tpsf_cube_9x32x32xt.npy", scan_irf_norm_cube)
     np.save(scan_dir / "scan_tpsf_cube_raw_9x32x32xt.npy", scan_raw_cube)
-    np.save(scan_dir / "scan_tpsf_cube_irf_raw_9x32x32xt.npy", scan_raw_cube)
-    np.save(scan_dir / "scan_tpsf_cube_sum_norm_9x32x32xt.npy", scan_sum_norm_cube)
-    np.save(scan_dir / "scan_detector_intensity_9x32x32.npy", intensity)
+    np.save(scan_dir / "object_mask_zy.npy", first_mask_zy)
+    np.save(scan_dir / "selected_image_crop.npy", crop)
     np.savez(
         scan_dir / "pmcx_obj_scan_result.npz",
-        scan_tpsf_cube_9x32x32xt=scan_cube,
-        scan_tpsf_cube_raw_9x32x32xt=scan_raw_cube,
-        scan_tpsf_cube_irf_raw_9x32x32xt=scan_raw_cube,
-        scan_tpsf_cube_sum_norm_9x32x32xt=scan_sum_norm_cube,
-        scan_detector_intensity_9x32x32=intensity,
         source_positions_yz_mm=np.asarray(
             [[p["source_y_mm"], p["source_z_mm"]] for p in positions],
             dtype=float,
         ),
         point_row_col=np.asarray([[p["row"], p["col"]] for p in positions], dtype=int),
-        point_dirs=np.asarray(point_dirs, dtype=object),
+        point_dirs=np.asarray([], dtype=object),
         scan_center_yz_mm=np.asarray([center_y_mm, center_z_mm], dtype=float),
         scan_spacing_mm=float(spacing_mm),
+        storage_mode="raw_and_irf_global_max_norm_npy",
+        irf_variable=irf_var,
+        period_bins=int(scan_raw_cube.shape[3]),
     )
-    plot_scan_overview(scan_cube, positions, scan_dir / "scan_3x3_overview.png")
+    plot_scan_overview(scan_irf_norm_cube, positions, scan_dir / "scan_3x3_overview.png")
 
     with open(scan_dir / "scan_settings_and_meta.json", "w", encoding="utf-8") as f:
         json.dump(
@@ -883,8 +891,13 @@ def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: f
                         "order": "row-major from top-left; z high to low, y low to high",
                         "positions": positions,
                     },
-                    "point_dirs": point_dirs,
-                    "cube_shape": scan_cube.shape,
+                    "point_dirs": [],
+                    "cube_shape": scan_raw_cube.shape,
+                    "storage_mode": "raw_and_irf_global_max_norm_npy",
+                    "object_present": object_present,
+                    "selected_quad_xy": quad_xy,
+                    "meta": first_meta,
+                    "irf_variable": irf_var,
                 }
             ),
             f,
@@ -894,7 +907,8 @@ def run_source_scan(settings: ObjSimSettings, center_y_mm: float, center_z_mm: f
 
     elapsed = time.perf_counter() - started
     log(f"Saved 3 x 3 scan to {scan_dir}")
-    log(f"Scan cube shape: {scan_cube.shape}")
+    log(f"Raw scan cube shape: {scan_raw_cube.shape}")
+    log(f"IRF max-normalized scan cube shape: {scan_irf_norm_cube.shape}")
     log(f"Finished scan in {elapsed:.1f}s")
     return scan_dir
 
@@ -1033,8 +1047,8 @@ class PMCXObjectWindow(QMainWindow):
     def optical_group(self):
         group = QGroupBox("Scatterer optical parameters")
         form = QFormLayout(group)
-        self.mua = self.spin_float(1e-6, 1, 0.0009153, 6)
-        self.mus = self.spin_float(1e-4, 100, 1.7874, 5)
+        self.mua = self.spin_float(1e-6, 1, 0.0007716, 6)
+        self.mus = self.spin_float(1e-4, 100, 1.7699, 5)
         self.g = self.spin_float(-0.99, 0.99, 0, 3)
         self.n = self.spin_float(1.0, 3.0, 1.05, 4)
         for label, widget in [

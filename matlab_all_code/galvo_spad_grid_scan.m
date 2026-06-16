@@ -11,7 +11,7 @@ addpath(genpath(PROJECT_ROOT));
 PF_WRAPPER_PATHS = {
     'D:\coding\Photon Force\PF32\Matlab\my_wrapper'
     'D:\coding\PF32\Matlab'
-};
+    };
 
 for pathIdx = 1:numel(PF_WRAPPER_PATHS)
     if isfolder(PF_WRAPPER_PATHS{pathIdx})
@@ -29,9 +29,10 @@ DEFAULT_LASER_REP_FREQ_HZ = 80.33e6;
 DEFAULT_GALVO_SETTLE_S = 0.2;
 DEFAULT_DISPLAY_EACH_HIST = false;
 DEFAULT_ALLOW_OVERWRITE = false;
+DEFAULT_SCAN_PRESET_ID = '15mm';
 V_LIMIT_V = 2;
-PARK_X_V = -0.090;
-PARK_Y_V = 0.025;
+PARK_X_V = -0.070;
+PARK_Y_V = 0.020;
 
 scan_point_names = {
     '左上'
@@ -43,7 +44,7 @@ scan_point_names = {
     '左下'
     '下中'
     '右下'
-};
+    };
 
 scan_point_ids = {
     'left_top'
@@ -55,21 +56,39 @@ scan_point_ids = {
     'left_bottom'
     'bottom_middle'
     'right_bottom'
-};
+    };
 
-scan_points_v = [
-     0.300,  0.450;   % 1 left_top
-    -0.100,  0.450;   % 2 top_middle
-    -0.510,  0.450;   % 3 right_top
-     0.300,  0.025;   % 4 left_middle
-    -0.090,  0.025;   % 5 center
-    -0.510,  0.025;   % 6 right_middle
-     0.300, -0.385;   % 7 left_bottom
-    -0.085, -0.385;   % 8 bottom_middle
-    -0.500, -0.385;   % 9 right_bottom
-];
+scan_preset_ids = {'15mm', '30mm'};
+scan_preset_labels = {'15 mm (20260615)', '30 mm (20260615)'};
+scan_preset_spacing_mm = [15, 30];
 
-if any(abs(scan_points_v(:)) > V_LIMIT_V)
+% 15 mm scan spacing, 20260615 grid-paper calibration.
+scan_points_15mm_v = [
+    0.330,  0.440;   % 1 left_top
+    -0.070,  0.440;   % 2 top_middle
+    -0.480,  0.440;   % 3 right_top
+    0.330,  0.020;   % 4 left_middle
+    -0.070,  0.020;   % 5 center
+    -0.470,  0.020;   % 6 right_middle
+    0.340, -0.400;   % 7 left_bottom
+    -0.070, -0.400;   % 8 bottom_middle
+    -0.470, -0.400;   % 9 right_bottom
+    ];
+
+% 30 mm scan spacing, 20260615 grid-paper calibration.
+scan_points_30mm_v = [
+    0.730,  0.870;   % 1 left_top
+    -0.080,  0.870;   % 2 top_middle
+    -0.890,  0.860;   % 3 right_top
+    0.740,  0.030;   % 4 left_middle
+    -0.070,  0.020;   % 5 center
+    -0.880,  0.020;   % 6 right_middle
+    0.740, -0.810;   % 7 left_bottom
+    -0.060, -0.820;   % 8 bottom_middle
+    -0.870, -0.820;   % 9 right_bottom
+    ];
+
+if any(abs([scan_points_15mm_v(:); scan_points_30mm_v(:)]) > V_LIMIT_V)
     error('Scan voltage exceeds safety range: %.3f V to %.3f V.', ...
         -V_LIMIT_V, V_LIMIT_V);
 end
@@ -156,22 +175,30 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
             'UserData', {'pointwise', 'roundwise'}, ...
             'Value', find(strcmp({'pointwise', 'roundwise'}, DEFAULT_AVERAGE_MODE), 1));
 
+        addLabel(handles.paramPanel, xLabel, y0 - 8*dy, 'Scan spacing');
+        handles.scanPresetPopup = uicontrol(handles.paramPanel, 'Style', 'popupmenu', ...
+            'Units', 'pixels', ...
+            'Position', [xEdit, y0 - 8*dy, editW, 24], ...
+            'String', scan_preset_labels, ...
+            'UserData', scan_preset_ids, ...
+            'Value', find(strcmp(scan_preset_ids, DEFAULT_SCAN_PRESET_ID), 1));
+
         handles.displayHistCheck = uicontrol(handles.paramPanel, 'Style', 'checkbox', ...
             'Units', 'pixels', ...
-            'Position', [18, 88, 150, 22], ...
+            'Position', [18, 58, 150, 22], ...
             'Value', DEFAULT_DISPLAY_EACH_HIST, ...
             'String', '每点显示 hist');
 
         handles.overwriteCheck = uicontrol(handles.paramPanel, 'Style', 'checkbox', ...
             'Units', 'pixels', ...
-            'Position', [175, 88, 150, 22], ...
+            'Position', [175, 58, 150, 22], ...
             'Value', DEFAULT_ALLOW_OVERWRITE, ...
             'String', '允许覆盖');
 
-        addLabel(handles.paramPanel, xLabel, 60, '实验备注');
+        addLabel(handles.paramPanel, xLabel, 34, '实验备注');
         handles.noteEdit = uicontrol(handles.paramPanel, 'Style', 'edit', ...
             'Units', 'pixels', ...
-            'Position', [18, 18, 320, 40], ...
+            'Position', [18, 6, 320, 28], ...
             'HorizontalAlignment', 'left', ...
             'Max', 2, ...
             'Min', 0, ...
@@ -402,7 +429,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
 
             phaseLog = acquireGridPhase( ...
                 phaseName, state.pf32, state.afg, ...
-                scan_point_names, scan_point_ids, scan_points_v, cfg, ...
+                scan_point_names, scan_point_ids, cfg.scanPointsV, cfg, ...
                 outputDir);
 
             phaseLogName = sprintf('%s_scan_log.mat', phaseName);
@@ -481,6 +508,9 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
             scanInfo.point_id = pointIds{pointIdx};
             scanInfo.target_voltage_x_v = targetVoltageX;
             scanInfo.target_voltage_y_v = targetVoltageY;
+            scanInfo.scan_preset_id = cfg.scanPresetId;
+            scanInfo.scan_preset_label = cfg.scanPresetLabel;
+            scanInfo.scan_spacing_mm = cfg.scanSpacingMm;
             scanInfo.expo_time_us = cfg.expoTimeUs;
             scanInfo.num_frames = cfg.numFrames;
             scanInfo.hist_repeats = cfg.histRepeats;
@@ -590,6 +620,9 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
             scanInfo.point_id = pointIds{pointIdx};
             scanInfo.target_voltage_x_v = targetVoltageX;
             scanInfo.target_voltage_y_v = targetVoltageY;
+            scanInfo.scan_preset_id = cfg.scanPresetId;
+            scanInfo.scan_preset_label = cfg.scanPresetLabel;
+            scanInfo.scan_spacing_mm = cfg.scanSpacingMm;
             scanInfo.expo_time_us = cfg.expoTimeUs;
             scanInfo.num_frames = cfg.numFrames;
             scanInfo.hist_repeats = cfg.histRepeats;
@@ -698,6 +731,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         cfg.displayEachHist = logical(get(handles.displayHistCheck, 'Value'));
         cfg.allowOverwrite = logical(get(handles.overwriteCheck, 'Value'));
         cfg.averageMode = readAverageMode();
+        [cfg.scanPresetId, cfg.scanPresetLabel, cfg.scanSpacingMm, cfg.scanPointsV] = readScanPreset();
         cfg.experimentNote = readMultilineText(handles.noteEdit);
         cfg.selectedPointIndices = readSelectedPointIndices();
 
@@ -741,6 +775,9 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         metadata.afg_visa_address = cfg.afgVisaAddress;
         metadata.afg_output_load = 'High-Z / MAX';
         metadata.park_voltage_v = [PARK_X_V, PARK_Y_V];
+        metadata.scan_preset_id = cfg.scanPresetId;
+        metadata.scan_preset_label = cfg.scanPresetLabel;
+        metadata.scan_spacing_mm = cfg.scanSpacingMm;
         metadata.laser_degree = cfg.laserDegree;
         metadata.expo_time_us = cfg.expoTimeUs;
         metadata.num_frames = cfg.numFrames;
@@ -754,7 +791,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         metadata.selected_point_indices = cfg.selectedPointIndices;
         metadata.scan_point_names = scan_point_names;
         metadata.scan_point_ids = scan_point_ids;
-        metadata.scan_points_v = scan_points_v;
+        metadata.scan_points_v = cfg.scanPointsV;
 
         if exist(metadataPath, 'file') && ~cfg.allowOverwrite
             existingVars = whos('-file', metadataPath);
@@ -806,9 +843,9 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
 
     function runFolderName = makeRunFolderName(cfg)
         stamp = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
-        runFolderName = sprintf('3x3_grid_scan_%s_deg_%s_exp_%sus_frames_%d_avg_%d', ...
-            stamp, numberToken(cfg.laserDegree), numberToken(cfg.expoTimeUs), ...
-            cfg.numFrames, cfg.histRepeats);
+        runFolderName = sprintf('3x3_grid_scan_%s_%s_deg_%s_exp_%sus_frames_%d_avg_%d', ...
+            stamp, cfg.scanPresetId, numberToken(cfg.laserDegree), ...
+            numberToken(cfg.expoTimeUs), cfg.numFrames, cfg.histRepeats);
     end
 
     function writeExperimentNoteFile(outputDir, metadata, experimentNote)
@@ -866,6 +903,23 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
         modeTags = get(handles.averageModePopup, 'UserData');
         modeIdx = get(handles.averageModePopup, 'Value');
         averageMode = modeTags{modeIdx};
+    end
+
+    function [presetId, presetLabel, spacingMm, scanPointsV] = readScanPreset()
+        presetIds = get(handles.scanPresetPopup, 'UserData');
+        presetIdx = get(handles.scanPresetPopup, 'Value');
+        presetId = presetIds{presetIdx};
+        presetLabel = scan_preset_labels{presetIdx};
+        spacingMm = scan_preset_spacing_mm(presetIdx);
+
+        switch presetId
+            case '15mm'
+                scanPointsV = scan_points_15mm_v;
+            case '30mm'
+                scanPointsV = scan_points_30mm_v;
+            otherwise
+                error('Unknown scan preset: %s', presetId);
+        end
     end
 
     function phaseLog = getLatestPhaseLogForVisualization()
@@ -1000,7 +1054,7 @@ logMessage('UI 已打开。先点击“初始化硬件”，再选择 OBJ/REF �
             handles.fullFlowButton
             handles.showFolderButton
             handles.visualizeButton
-        ];
+            ];
 
         if isBusy
             set(controls, 'Enable', 'off');
@@ -1081,187 +1135,190 @@ end
 
 %% --- Hardware helpers ---
 function afg = openAfg(visaAddress)
-    afg = visadev(visaAddress);
-    configureTerminator(afg, "LF");
-    afg.Timeout = 5;
+afg = visadev(visaAddress);
+configureTerminator(afg, "LF");
+afg.Timeout = 5;
 
-    idn = strtrim(writeread(afg, '*IDN?'));
-    fprintf('Connected to AFG: %s\n', idn);
+idn = strtrim(writeread(afg, '*IDN?'));
+fprintf('Connected to AFG: %s\n', idn);
 
-    configureAfgDcChannel(afg, 1);
-    configureAfgDcChannel(afg, 2);
-    writeline(afg, 'OUTP1:STAT ON');
-    writeline(afg, 'OUTP2:STAT ON');
+configureAfgDcChannel(afg, 1);
+configureAfgDcChannel(afg, 2);
+writeline(afg, 'OUTP1:STAT ON');
+writeline(afg, 'OUTP2:STAT ON');
 end
 
 function pf32 = openSpad()
-    try
-        ok = pf_getLibraryStatus;
-        if ok
-            pf_close;
-        end
-    catch statusErr
-        warning('SPAD library status check failed before opening: %s', statusErr.message);
+try
+    ok = pf_getLibraryStatus;
+    if ok
+        pf_close;
     end
+catch statusErr
+    warning('SPAD library status check failed before opening: %s', statusErr.message);
+end
 
-    [pf32, ~, ~] = pf_open;
-    pf_getLibraryStatus;
+[pf32, ~, ~] = pf_open;
+pf_getLibraryStatus;
 end
 
 function configureSpad(pf32, expoTimeUs)
-    pf_setMode(pf32, 'TCSPC_laser_master');
-    pf_setNumberAccumulations(pf32, 1);
-    pf_setExposure(pf32, expoTimeUs);
+pf_setMode(pf32, 'TCSPC_laser_master');
+pf_setNumberAccumulations(pf32, 1);
+pf_setExposure(pf32, expoTimeUs);
 end
 
 function configureAfgDcChannel(afg, chan)
-    writeline(afg, sprintf('OUTP%d:IMP MAX', chan));
-    writeline(afg, sprintf('SOUR%d:FUNC:SHAP DC', chan));
-    writeline(afg, sprintf('SOUR%d:VOLT:UNIT VPP', chan));
-    writeline(afg, sprintf('SOUR%d:VOLT:AMPL 0.001VPP', chan));
+writeline(afg, sprintf('OUTP%d:IMP MAX', chan));
+writeline(afg, sprintf('SOUR%d:FUNC:SHAP DC', chan));
+writeline(afg, sprintf('SOUR%d:VOLT:UNIT VPP', chan));
+writeline(afg, sprintf('SOUR%d:VOLT:AMPL 0.001VPP', chan));
 end
 
 function writeGalvoVoltage(afg, targetVoltageX, targetVoltageY)
-    validateAfgVoltage(targetVoltageX, 'X');
-    validateAfgVoltage(targetVoltageY, 'Y');
-    setAfgDcVoltage(afg, 1, targetVoltageX);
-    setAfgDcVoltage(afg, 2, targetVoltageY);
+validateAfgVoltage(targetVoltageX, 'X');
+validateAfgVoltage(targetVoltageY, 'Y');
+setAfgDcVoltage(afg, 1, targetVoltageX);
+setAfgDcVoltage(afg, 2, targetVoltageY);
 end
 
 function validateAfgVoltage(voltageV, axisName)
-    maxAbsVoltageV = 2;
-    if ~isfinite(voltageV) || abs(voltageV) > maxAbsVoltageV
-        error('Galvo %s voltage %.6g V exceeds safety range +/- %.3f V.', ...
-            axisName, voltageV, maxAbsVoltageV);
-    end
+maxAbsVoltageV = 2;
+if ~isfinite(voltageV) || abs(voltageV) > maxAbsVoltageV
+    error('Galvo %s voltage %.6g V exceeds safety range +/- %.3f V.', ...
+        axisName, voltageV, maxAbsVoltageV);
+end
 end
 
 function setAfgDcVoltage(afg, chan, voltageV)
-    writeline(afg, sprintf('SOUR%d:VOLT:OFFS %.9gV', chan, voltageV));
+writeline(afg, sprintf('SOUR%d:VOLT:OFFS %.9gV', chan, voltageV));
 end
 
 function parkAndReleaseAfg(afg, parkXVoltageV, parkYVoltageV)
-    if isempty(afg)
-        return;
-    end
+if isempty(afg)
+    return;
+end
 
-    try
-        writeGalvoVoltage(afg, parkXVoltageV, parkYVoltageV);
-        writeline(afg, 'OUTP1:STAT ON');
-        writeline(afg, 'OUTP2:STAT ON');
-        pause(0.2);
-    catch closeErr
-        warning('Failed to park AFG outputs before releasing connection: %s', closeErr.message);
-    end
+try
+    writeGalvoVoltage(afg, parkXVoltageV, parkYVoltageV);
+    writeline(afg, 'OUTP1:STAT ON');
+    writeline(afg, 'OUTP2:STAT ON');
+    pause(0.2);
+catch closeErr
+    warning('Failed to park AFG outputs before releasing connection: %s', closeErr.message);
+end
 
-    clear afg;
-    fprintf('AFG parked at X = %.3f V, Y = %.3f V. Outputs left ON; MATLAB connection released.\n', ...
-        parkXVoltageV, parkYVoltageV);
+clear afg;
+fprintf('AFG parked at X = %.3f V, Y = %.3f V. Outputs left ON; MATLAB connection released.\n', ...
+    parkXVoltageV, parkYVoltageV);
 end
 
 function closeSpad(pf32)
+try
+    pf_close(pf32);
+catch
     try
-        pf_close(pf32);
-    catch
-        try
-            pf_close;
-        catch closeErr
-            warning('SPAD close failed: %s', closeErr.message);
-        end
+        pf_close;
+    catch closeErr
+        warning('SPAD close failed: %s', closeErr.message);
     end
+end
 end
 
 %% --- Data / validation helpers ---
 function scanInfo = blankScanInfo()
-    scanInfo = struct( ...
-        'phase', '', ...
-        'point_index', [], ...
-        'point_name', '', ...
-        'point_id', '', ...
-        'target_voltage_x_v', [], ...
-        'target_voltage_y_v', [], ...
-        'expo_time_us', [], ...
-        'num_frames', [], ...
-        'hist_repeats', [], ...
-        'average_mode', '', ...
-        'laser_rep_freq_hz', [], ...
-        'laser_degree', [], ...
-        'elapsed_s', [], ...
-        'repeat_elapsed_s', [], ...
-        'acquired_at', '', ...
-        'file', '');
+scanInfo = struct( ...
+    'phase', '', ...
+    'point_index', [], ...
+    'point_name', '', ...
+    'point_id', '', ...
+    'target_voltage_x_v', [], ...
+    'target_voltage_y_v', [], ...
+    'scan_preset_id', '', ...
+    'scan_preset_label', '', ...
+    'scan_spacing_mm', [], ...
+    'expo_time_us', [], ...
+    'num_frames', [], ...
+    'hist_repeats', [], ...
+    'average_mode', '', ...
+    'laser_rep_freq_hz', [], ...
+    'laser_degree', [], ...
+    'elapsed_s', [], ...
+    'repeat_elapsed_s', [], ...
+    'acquired_at', '', ...
+    'file', '');
 end
 
 function text = timestampText()
-    text = char(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss'));
+text = char(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss'));
 end
 
 function text = readMultilineText(editHandle)
-    rawValue = get(editHandle, 'String');
-    if iscell(rawValue)
-        text = strjoin(rawValue(:).', newline);
-    elseif isstring(rawValue)
-        text = strjoin(cellstr(rawValue(:)), newline);
-    elseif ischar(rawValue) && size(rawValue, 1) > 1
-        text = strjoin(cellstr(rawValue), newline);
-    else
-        text = char(rawValue);
-    end
+rawValue = get(editHandle, 'String');
+if iscell(rawValue)
+    text = strjoin(rawValue(:).', newline);
+elseif isstring(rawValue)
+    text = strjoin(cellstr(rawValue(:)), newline);
+elseif ischar(rawValue) && size(rawValue, 1) > 1
+    text = strjoin(cellstr(rawValue), newline);
+else
+    text = char(rawValue);
+end
 
-    text = strrep(text, sprintf('\r\n'), newline);
-    text = strrep(text, sprintf('\r'), newline);
+text = strrep(text, sprintf('\r\n'), newline);
+text = strrep(text, sprintf('\r'), newline);
 end
 
 function value = readPositiveNumber(editHandle, label)
-    value = str2double(strtrim(get(editHandle, 'String')));
-    if ~isfinite(value) || value <= 0
-        error('%s 必须是正数。', label);
-    end
+value = str2double(strtrim(get(editHandle, 'String')));
+if ~isfinite(value) || value <= 0
+    error('%s 必须是正数。', label);
+end
 end
 
 function value = readNonnegativeNumber(editHandle, label)
-    value = str2double(strtrim(get(editHandle, 'String')));
-    if ~isfinite(value) || value < 0
-        error('%s 必须是非负数。', label);
-    end
+value = str2double(strtrim(get(editHandle, 'String')));
+if ~isfinite(value) || value < 0
+    error('%s 必须是非负数。', label);
+end
 end
 
 function value = readFiniteNumber(editHandle, label)
-    value = str2double(strtrim(get(editHandle, 'String')));
-    if ~isfinite(value)
-        error('%s 必须是有效数字。', label);
-    end
+value = str2double(strtrim(get(editHandle, 'String')));
+if ~isfinite(value)
+    error('%s 必须是有效数字。', label);
+end
 end
 
 function text = onOffText(isOn)
-    if isOn
-        text = '已连接';
-    else
-        text = '未连接';
-    end
+if isOn
+    text = '已连接';
+else
+    text = '未连接';
+end
 end
 
 function addLabel(parent, x, y, labelText)
-    uicontrol(parent, 'Style', 'text', ...
-        'Units', 'pixels', ...
-        'Position', [x, y, 125, 22], ...
-        'HorizontalAlignment', 'left', ...
-        'String', labelText);
+uicontrol(parent, 'Style', 'text', ...
+    'Units', 'pixels', ...
+    'Position', [x, y, 125, 22], ...
+    'HorizontalAlignment', 'left', ...
+    'String', labelText);
 end
 
 function handle = addEdit(parent, x, y, width, valueText)
-    handle = uicontrol(parent, 'Style', 'edit', ...
-        'Units', 'pixels', ...
-        'Position', [x, y, width, 24], ...
-        'HorizontalAlignment', 'left', ...
-        'String', valueText);
+handle = uicontrol(parent, 'Style', 'edit', ...
+    'Units', 'pixels', ...
+    'Position', [x, y, width, 24], ...
+    'HorizontalAlignment', 'left', ...
+    'String', valueText);
 end
 
 function handle = addButton(parent, position, label, callback)
-    handle = uicontrol(parent, 'Style', 'pushbutton', ...
-        'Units', 'pixels', ...
-        'Position', position, ...
-        'FontSize', 10, ...
-        'String', label, ...
-        'Callback', callback);
+handle = uicontrol(parent, 'Style', 'pushbutton', ...
+    'Units', 'pixels', ...
+    'Position', position, ...
+    'FontSize', 10, ...
+    'String', label, ...
+    'Callback', callback);
 end
