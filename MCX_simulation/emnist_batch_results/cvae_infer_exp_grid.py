@@ -23,12 +23,21 @@ ROI_SLICE = (slice(10, 22), slice(10, 22))  # MATLAB [11:22, 11:22]
 
 DEFAULT_DATA_DIR = (
     "F:/OneDrive/foam_imaging_project/experiment_setup/matlab_all_code/data/"
-    "3x3_grid_scan_20260615_153557_15mm_deg_0_exp_2us_frames_100000_avg_10_X"
+    "3x3_grid_scan_20260615_155728_15mm_deg_0_exp_2us_frames_100000_avg_10_A_DC"
 )
+
+# 15 mm spacing weight
 DEFAULT_CHECKPOINT = (
     "F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/"
     "train_results/checkpoints/cvae_recon_checkpoints_160626/cvae_epoch_50_2.5_1136.pth"
 )
+
+# # 30 mm spacing weight
+# DEFAULT_CHECKPOINT = (
+#     "F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/"
+#     "train_results/checkpoints/cvae_recon_checkpoints_170626/cvae_epoch_50_2.5_1240.pth"
+# )
+
 DEFAULT_OUTPUT_ROOT = (
     "F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/"
     "exp_infer_results"

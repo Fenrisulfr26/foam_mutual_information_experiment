@@ -1,4 +1,4 @@
-import argparse
+import csv
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -24,6 +24,22 @@ IRF_TIME_BINS = 227
 MODEL_TIME_BINS = 121
 BATCH_DIR = "F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/20260615_220457_emnist_pmcx_3x3_multisource_batch"
 CHECKPOINT_ROOT = "F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/train_results/checkpoints"
+EXP_DATA_DIR = (
+    "F:/OneDrive/foam_imaging_project/experiment_setup/matlab_all_code/data/"
+    "3x3_grid_scan_20260615_153557_15mm_deg_0_exp_2us_frames_100000_avg_10_X_DC"
+)
+EXP_ROI_SLICE = (slice(10, 22), slice(10, 22))  # MATLAB [11:22, 11:22]
+
+# -------------------- Run settings --------------------
+# Edit these values directly before running this script.
+RUN_BATCH_DIR = BATCH_DIR
+RUN_EXP_DATA_DIR = EXP_DATA_DIR
+RUN_CHECKPOINT = None  # None means use the newest .pth under CHECKPOINT_ROOT.
+RUN_LETTER = "X"
+RUN_LETTER_OCCURRENCE = 0  # 0 means the first X sample in batch_manifest.csv.
+RUN_N_RECON = 8
+RUN_BATCH_SIZE = BATCH_SIZE
+RUN_SKIP_RECON = True  # True only shows the TPSF curve comparison.
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -268,6 +284,54 @@ def load_preprocessed_dataset(batch_dir):
     return torch.from_numpy(x.copy()), torch.from_numpy(y.copy())
 
 
+def find_letter_sample_index(batch_dir, letter="X", occurrence=0):
+    manifest_path = Path(batch_dir) / "batch_manifest.csv"
+    matches = []
+    with manifest_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("letter") == letter and row.get("status") == "ok":
+                matches.append(int(row["matrix_index"]))
+    if not matches:
+        raise ValueError(f"No samples with letter '{letter}' found in {manifest_path}")
+    if occurrence < 0 or occurrence >= len(matches):
+        raise IndexError(f"Requested occurrence {occurrence}, but only found {len(matches)} samples for letter '{letter}'")
+    return matches[occurrence], len(matches)
+
+
+def sorted_exp_point_files(exp_data_dir):
+    files = []
+    for path in Path(exp_data_dir).glob("hist_*point*.mat"):
+        name = path.name
+        marker = "point"
+        if marker in name:
+            point_text = name.split(marker, 1)[1][:2]
+            if point_text.isdigit():
+                files.append((int(point_text), path))
+    files = [path for _, path in sorted(files)]
+    if len(files) != 9:
+        raise RuntimeError(f"Expected 9 experimental point files, found {len(files)} in {exp_data_dir}")
+    return files
+
+
+def load_experiment_condition(exp_data_dir):
+    exp_grid = np.zeros((3, 3, IRF_TIME_BINS), dtype=np.float32)
+    for idx, path in enumerate(sorted_exp_point_files(exp_data_dir)):
+        mat = loadmat(path)
+        if "hist" not in mat:
+            raise KeyError(f"Missing 'hist' in {path}")
+        hist = np.asarray(mat["hist"], dtype=np.float32)
+        row, col = divmod(idx, 3)
+        exp_grid[row, col, :] = hist[EXP_ROI_SLICE[0], EXP_ROI_SLICE[1], :].sum(axis=(0, 1))
+    exp_grid = resample(exp_grid, MODEL_TIME_BINS, axis=-1).astype(np.float32)
+    exp_grid *= IRF_TIME_BINS / MODEL_TIME_BINS
+    exp_grid = np.maximum(exp_grid, 0)
+    max_val = float(exp_grid.max())
+    if max_val > 0:
+        exp_grid /= max_val
+    return exp_grid
+
+
 def load_model(checkpoint_path):
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -308,32 +372,51 @@ def plot_reconstructions(model, dataloader, n=8):
     plt.show()
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Display CVAE validation/test-set reconstruction results.")
-    parser.add_argument("--batch-dir", default=BATCH_DIR)
-    parser.add_argument("--checkpoint", default=None, help="Defaults to latest .pth under train_results/checkpoints.")
-    parser.add_argument("--n", type=int, default=8, help="Number of validation samples to display.")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    return parser.parse_args()
+def plot_tpsf_comparison(sim_y_tensor, exp_grid, sample_index, letter="X"):
+    sim_grid = sim_y_tensor.squeeze(0).numpy().transpose(1, 2, 0)
+    time_axis = np.arange(MODEL_TIME_BINS)
+    fig, axes = plt.subplots(3, 3, figsize=(12, 9), sharex=True, sharey=True)
+    for row in range(3):
+        for col in range(3):
+            ax = axes[row, col]
+            ax.plot(time_axis, sim_grid[row, col, :], label=f"sim {letter}", linewidth=1.8)
+            ax.plot(time_axis, exp_grid[row, col, :], label="experiment", linewidth=1.8)
+            ax.set_title(f"Point ({row + 1}, {col + 1})")
+            ax.grid(True, alpha=0.3)
+            if row == 2:
+                ax.set_xlabel("Time bin")
+            if col == 0:
+                ax.set_ylabel("Normalized TPSF")
+    axes[0, 0].legend()
+    fig.suptitle(f"Processed 3x3x121 TPSF comparison: dataset {letter} sample index {sample_index} vs experiment", fontsize=13)
+    fig.tight_layout()
+    plt.show()
 
 
 def main():
-    args = parse_args()
-    checkpoint_path = args.checkpoint or load_latest_checkpoint(CHECKPOINT_ROOT)
+    checkpoint_path = RUN_CHECKPOINT or load_latest_checkpoint(CHECKPOINT_ROOT)
     print(f"Device: {device}")
     print(f"Checkpoint: {checkpoint_path}")
     print("Loading and preprocessing dataset...")
-    x, y = load_preprocessed_dataset(args.batch_dir)
+    x, y = load_preprocessed_dataset(RUN_BATCH_DIR)
+    sample_index, total_letter_matches = find_letter_sample_index(RUN_BATCH_DIR, RUN_LETTER, RUN_LETTER_OCCURRENCE)
+    print(f"Using letter '{RUN_LETTER}' sample matrix_index={sample_index} ({RUN_LETTER_OCCURRENCE + 1}/{total_letter_matches}).")
+    exp_grid = load_experiment_condition(RUN_EXP_DATA_DIR)
+    plot_tpsf_comparison(y[sample_index], exp_grid, sample_index, letter=RUN_LETTER)
+
+    if RUN_SKIP_RECON:
+        return
+
     dataset = MyDataset(x, y)
     train_len = int(len(dataset) * 0.95)
     val_len = len(dataset) - train_len
     generator = torch.Generator().manual_seed(RANDOM_SEED)
     _, valset = random_split(dataset, [train_len, val_len], generator=generator)
-    val_loader = DataLoader(valset, batch_size=max(args.n, args.batch_size), shuffle=False, num_workers=0)
+    val_loader = DataLoader(valset, batch_size=max(RUN_N_RECON, RUN_BATCH_SIZE), shuffle=False, num_workers=0)
     model, checkpoint = load_model(checkpoint_path)
     print(f"Loaded checkpoint epoch: {checkpoint.get('epoch', 'Unknown')}")
     print(f"Validation samples: {len(valset)}")
-    plot_reconstructions(model, val_loader, n=args.n)
+    plot_reconstructions(model, val_loader, n=RUN_N_RECON)
 
 
 if __name__ == "__main__":

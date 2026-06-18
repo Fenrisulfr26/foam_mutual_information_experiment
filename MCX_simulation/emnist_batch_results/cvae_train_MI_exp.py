@@ -1008,8 +1008,8 @@ if __name__ == '__main__':
     input_x_all = []
     input_y_all = []
 
-    input_x_all = np.load(f'F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/20260615_220457_emnist_pmcx_3x3_multisource_batch/templates_50x50_uint8.npy') # [7000,50,50]
-    input_y_all = np.load(f'F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/20260615_220457_emnist_pmcx_3x3_multisource_batch/raw_tpsf_3x3x228_float32.npy') # [7000,3,3,228]
+    input_x_all = np.load(f'F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/20260616_211244_emnist_pmcx_3x3_multisource_batch_30mm/templates_50x50_uint8.npy') # [7000,50,50]
+    input_y_all = np.load(f'F:/OneDrive/foam_imaging_project/experiment_setup/MCX_simulation/emnist_batch_results/20260616_211244_emnist_pmcx_3x3_multisource_batch_30mm/raw_tpsf_3x3x228_float32.npy') # [7000,3,3,228]
     input_y_all = input_y_all[:, :, :, :IRF_TIME_BINS] # trim to 227 bins before IRF convolution
 
     IRF = extract_center_irf(load_irf_mat(IRF_MAT_PATH)) # (227,)
